@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import styles from "./page.module.css";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -44,33 +44,28 @@ function readConversations(value: string | null): Conversation[] {
     if (!Array.isArray(parsed)) return [];
 
     return parsed
-      .filter(
-        (item): item is Conversation =>
-          item !== null &&
-          typeof item === "object" &&
-          typeof item.id === "string" &&
-          typeof item.title === "string" &&
-          typeof item.updatedAt === "string" &&
-          Array.isArray(item.messages)
+      .filter((item): item is Conversation =>
+        item !== null &&
+        typeof item === "object" &&
+        typeof item.id === "string" &&
+        typeof item.title === "string" &&
+        typeof item.updatedAt === "string" &&
+        Array.isArray(item.messages)
       )
       .map((item) => ({
         id: item.id,
         title: item.title,
         updatedAt: item.updatedAt,
-        messages: item.messages.filter(
-          (message: unknown): message is Message =>
-            message !== null &&
-            typeof message === "object" &&
-            ["user", "assistant"].includes(
-              (message as Message).role
-            ) &&
-            typeof (message as Message).content === "string"
+        messages: item.messages.filter((message: unknown): message is Message =>
+          message !== null &&
+          typeof message === "object" &&
+          ["user", "assistant"].includes((message as Message).role) &&
+          typeof (message as Message).content === "string"
         ),
       }))
-      .sort(
-        (a, b) =>
-          new Date(b.updatedAt).getTime() -
-          new Date(a.updatedAt).getTime()
+      .sort((a, b) =>
+        new Date(b.updatedAt).getTime() -
+        new Date(a.updatedAt).getTime()
       );
   } catch {
     return [];
@@ -85,22 +80,29 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [historySearch, setHistorySearch] = useState("");
+  const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
   const [storageReady, setStorageReady] = useState(false);
   const [userId, setUserId] = useState("");
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const renameRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     try {
       let savedUserId = window.localStorage.getItem(USER_ID_KEY);
 
-if (!savedUserId) {
-  savedUserId = globalThis.crypto.randomUUID();
-  window.localStorage.setItem(USER_ID_KEY, savedUserId);
-}
+      if (!savedUserId) {
+        savedUserId = globalThis.crypto?.randomUUID?.() ??
+          `user-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-setUserId(savedUserId);
+        window.localStorage.setItem(USER_ID_KEY, savedUserId);
+      }
+
+      setUserId(savedUserId);
+
       const saved = readConversations(
         window.localStorage.getItem(STORAGE_KEY)
       );
@@ -132,66 +134,129 @@ setUserId(savedUserId);
   }, [conversations, storageReady]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    bottomRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "end",
+    });
   }, [messages, loading]);
 
+  useEffect(() => {
+    if (renamingChatId) {
+      renameRef.current?.focus();
+      renameRef.current?.select();
+    }
+  }, [renamingChatId]);
+
+  const filteredConversations = useMemo(() => {
+    const query = historySearch.trim().toLowerCase();
+
+    if (!query) return conversations;
+
+    return conversations.filter((chat) =>
+      chat.title.toLowerCase().includes(query) ||
+      chat.messages.some((message) =>
+        message.content.toLowerCase().includes(query)
+      )
+    );
+  }, [conversations, historySearch]);
+
   async function getAnswer(history: Message[]): Promise<string> {
-    const response = await fetch(WORKER_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        userId,
-        messages: history.map(({ role, content }) => ({
-          role,
-          content,
-        })),
-      }),
-    });
+    const controller = new AbortController();
 
-    const data = await response.json().catch(() => ({}));
+    const timeout = window.setTimeout(
+      () => controller.abort(),
+      90000
+    );
 
-    if (!response.ok) {
-      throw new Error(
-        data.error || `Request failed (${response.status}).`
-      );
+    try {
+      const response = await fetch(WORKER_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          userId,
+          messages: history.map(({ role, content }) => ({
+            role,
+            content,
+          })),
+        }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(
+          typeof data.error === "string"
+            ? data.error
+            : `Request failed (${response.status}).`
+        );
+      }
+
+      const answer =
+        data.choices?.[0]?.message?.content ??
+        data.response ??
+        data.result?.response ??
+        data.result?.choices?.[0]?.message?.content;
+
+      if (typeof answer !== "string" || !answer.trim()) {
+        throw new Error(
+          "The AI returned an empty answer. Please try again."
+        );
+      }
+
+      return answer.trim();
+    } catch (error) {
+      if (
+        error instanceof DOMException &&
+        error.name === "AbortError"
+      ) {
+        throw new Error(
+          "The request took too long. Please try again."
+        );
+      }
+
+      throw error;
+    } finally {
+      window.clearTimeout(timeout);
     }
-
-    const answer =
-      data.choices?.[0]?.message?.content ??
-      data.response ??
-      data.result?.response ??
-      data.result?.choices?.[0]?.message?.content;
-
-    if (typeof answer !== "string" || !answer.trim()) {
-      throw new Error("The AI returned an empty answer. Please try again.");
-    }
-
-    return answer.trim();
   }
 
-  function saveConversation(chatId: string, nextMessages: Message[]) {
+  function saveConversation(
+    chatId: string,
+    nextMessages: Message[]
+  ) {
     setMessages(nextMessages);
 
     if (nextMessages.length === 0) return;
 
-    const conversation: Conversation = {
-      id: chatId,
-      title: getTitle(nextMessages),
-      messages: nextMessages,
-      updatedAt: new Date().toISOString(),
-    };
+    setConversations((previous) => {
+      const existing = previous.find(
+        (chat) => chat.id === chatId
+      );
 
-    setConversations((previous) => [
-      conversation,
-      ...previous.filter((chat) => chat.id !== chatId),
-    ]);
+      const conversation: Conversation = {
+        id: chatId,
+        title: existing?.title || getTitle(nextMessages),
+        messages: nextMessages,
+        updatedAt: new Date().toISOString(),
+      };
+
+      return [
+        conversation,
+        ...previous.filter((chat) => chat.id !== chatId),
+      ];
+    });
   }
 
   async function sendMessage() {
     const text = input.trim();
+
     if (!text || loading || !storageReady || !userId) return;
 
     const chatId = activeChatId ?? createChatId();
+
     const history: Message[] = [
       ...messages,
       { role: "user", content: text },
@@ -201,6 +266,7 @@ setUserId(savedUserId);
     setInput("");
     setLoading(true);
     setHistoryOpen(false);
+
     saveConversation(chatId, history);
 
     try {
@@ -234,6 +300,7 @@ setUserId(savedUserId);
     if (loading || !activeChatId) return;
 
     const history = messages.slice(0, index);
+
     if (history.at(-1)?.role !== "user") return;
 
     setLoading(true);
@@ -268,6 +335,7 @@ setUserId(savedUserId);
   async function copyMessage(content: string, index: number) {
     try {
       await navigator.clipboard.writeText(content);
+
       setCopiedIndex(index);
       window.setTimeout(() => setCopiedIndex(null), 1500);
     } catch {
@@ -282,6 +350,8 @@ setUserId(savedUserId);
     setMessages([]);
     setInput("");
     setHistoryOpen(false);
+    setHistorySearch("");
+
     inputRef.current?.focus();
   }
 
@@ -292,6 +362,7 @@ setUserId(savedUserId);
     setMessages(chat.messages);
     setInput("");
     setHistoryOpen(false);
+
     inputRef.current?.focus();
   }
 
@@ -308,6 +379,35 @@ setUserId(savedUserId);
       setActiveChatId(null);
       setMessages([]);
     }
+
+    if (renamingChatId === chatId) {
+      setRenamingChatId(null);
+    }
+  }
+
+  function beginRename(chat: Conversation) {
+    setRenamingChatId(chat.id);
+    setRenameValue(chat.title);
+  }
+
+  function saveRename(chatId: string) {
+    const title = renameValue
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 60);
+
+    if (title) {
+      setConversations((previous) =>
+        previous.map((chat) =>
+          chat.id === chatId
+            ? { ...chat, title }
+            : chat
+        )
+      );
+    }
+
+    setRenamingChatId(null);
+    setRenameValue("");
   }
 
   return (
@@ -323,19 +423,26 @@ setUserId(savedUserId);
           }}
         >
           <span className={styles.logo}>K</span>
+
           <span>
             Krazy <span className={styles.brandAccent}>AI</span>
           </span>
         </a>
 
-        <div style={{ display: "flex", gap: 8 }}>
+        <div className={styles.headerActions}>
           <button
-            className={styles.newChat}
+            className={styles.historyButton}
             onClick={() => setHistoryOpen((open) => !open)}
-            disabled={loading || !storageReady}
+            disabled={!storageReady}
             type="button"
+            aria-expanded={historyOpen}
+            aria-controls="chat-history"
           >
-            History ({conversations.length})
+            <span aria-hidden="true">◷</span>
+            <span>History</span>
+            <span className={styles.count}>
+              {conversations.length}
+            </span>
           </button>
 
           <button
@@ -350,147 +457,243 @@ setUserId(savedUserId);
       </header>
 
       {historyOpen && (
-        <aside
-          aria-label="Saved conversations"
-          style={{
-            position: "fixed",
-            zIndex: 20,
-            top: 76,
-            right: 16,
-            width: "min(360px, calc(100vw - 32px))",
-            maxHeight: "65vh",
-            overflowY: "auto",
-            padding: 16,
-            border: "1px solid var(--border, #333)",
-            borderRadius: 14,
-            background: "var(--background, #151515)",
-            color: "var(--foreground, #fff)",
-            boxShadow: "0 12px 40px rgba(0,0,0,0.25)",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: 12,
-            }}
+        <>
+          <button
+            className={styles.backdrop}
+            aria-label="Close chat history"
+            onClick={() => setHistoryOpen(false)}
+            type="button"
+          />
+
+          <aside
+            className={styles.historyPanel}
+            id="chat-history"
+            aria-label="Saved conversations"
           >
-            <strong>Saved chats</strong>
-            <button
-              type="button"
-              onClick={() => setHistoryOpen(false)}
-              aria-label="Close chat history"
-            >
-              ✕
-            </button>
-          </div>
+            <div className={styles.historyHeading}>
+              <div>
+                <h2>Your chats</h2>
+                <p>
+                  {conversations.length} saved conversation
+                  {conversations.length === 1 ? "" : "s"}
+                </p>
+              </div>
 
-          {conversations.length === 0 ? (
-            <p style={{ opacity: 0.7, fontSize: 14 }}>
-              Your conversations will appear here when you start chatting.
-            </p>
-          ) : (
-            <div style={{ display: "grid", gap: 8 }}>
-              {conversations.map((chat) => (
-                <div
-                  key={chat.id}
-                  style={{
-                    display: "flex",
-                    gap: 8,
-                    alignItems: "stretch",
-                  }}
-                >
-                  <button
-                    type="button"
-                    onClick={() => openConversation(chat)}
-                    style={{
-                      flex: 1,
-                      minWidth: 0,
-                      padding: 10,
-                      textAlign: "left",
-                      borderRadius: 8,
-                      border: "1px solid #555",
-                      background:
-                        chat.id === activeChatId
-                          ? "rgba(128,128,128,0.2)"
-                          : "transparent",
-                      color: "inherit",
-                      cursor: "pointer",
-                    }}
-                  >
-                    <span
-                      style={{
-                        display: "block",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                        fontSize: 14,
-                      }}
-                    >
-                      {chat.title}
-                    </span>
-                    <span style={{ opacity: 0.65, fontSize: 12 }}>
-                      {chat.messages.length} messages ·{" "}
-                      {new Date(chat.updatedAt).toLocaleDateString()}
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => deleteConversation(chat.id)}
-                    disabled={loading}
-                    aria-label={`Delete ${chat.title}`}
-                    title="Delete conversation"
-                    style={{
-                      padding: "0 10px",
-                      borderRadius: 8,
-                      border: "1px solid #555",
-                      background: "transparent",
-                      color: "inherit",
-                      cursor: "pointer",
-                    }}
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
+              <button
+                className={styles.iconButton}
+                type="button"
+                onClick={() => setHistoryOpen(false)}
+                aria-label="Close history"
+              >
+                ×
+              </button>
             </div>
-          )}
 
-          <p style={{ fontSize: 12, opacity: 0.6, marginTop: 14 }}>
-            Saved in this browser on this device.
-          </p>
-        </aside>
+            <label className={styles.searchBox}>
+              <span aria-hidden="true">⌕</span>
+
+              <input
+                value={historySearch}
+                onChange={(event) =>
+                  setHistorySearch(event.target.value)
+                }
+                placeholder="Search chats and messages..."
+                aria-label="Search chat history"
+              />
+
+              {historySearch && (
+                <button
+                  type="button"
+                  onClick={() => setHistorySearch("")}
+                  aria-label="Clear search"
+                >
+                  ×
+                </button>
+              )}
+            </label>
+
+            <button
+              className={styles.panelNewChat}
+              type="button"
+              onClick={startNewChat}
+            >
+              <span aria-hidden="true">＋</span> Start a new chat
+            </button>
+
+            <div className={styles.chatList}>
+              {filteredConversations.length === 0 ? (
+                <div className={styles.emptyHistory}>
+                  <span aria-hidden="true">⌕</span>
+
+                  <strong>
+                    {historySearch
+                      ? "No matching chats"
+                      : "No conversations yet"}
+                  </strong>
+
+                  <p>
+                    {historySearch
+                      ? "Try another search term."
+                      : "Your saved conversations will appear here."}
+                  </p>
+                </div>
+              ) : (
+                filteredConversations.map((chat) => (
+                  <div
+                    className={`${styles.chatItem} ${
+                      chat.id === activeChatId
+                        ? styles.activeChat
+                        : ""
+                    }`}
+                    key={chat.id}
+                  >
+                    {renamingChatId === chat.id ? (
+                      <form
+                        className={styles.renameForm}
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          saveRename(chat.id);
+                        }}
+                      >
+                        <input
+                          ref={renameRef}
+                          value={renameValue}
+                          onChange={(event) =>
+                            setRenameValue(event.target.value)
+                          }
+                          maxLength={60}
+                          aria-label="New conversation name"
+                        />
+
+                        <button
+                          type="submit"
+                          aria-label="Save conversation name"
+                          title="Save"
+                        >
+                          ✓
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setRenamingChatId(null)
+                          }
+                          aria-label="Cancel rename"
+                          title="Cancel"
+                        >
+                          ×
+                        </button>
+                      </form>
+                    ) : (
+                      <>
+                        <button
+                          className={styles.chatOpen}
+                          type="button"
+                          onClick={() => openConversation(chat)}
+                        >
+                          <strong>{chat.title}</strong>
+
+                          <span>
+                            {chat.messages.length} messages ·{" "}
+                            {new Date(
+                              chat.updatedAt
+                            ).toLocaleDateString()}
+                          </span>
+                        </button>
+
+                        <div className={styles.chatTools}>
+                          <button
+                            className={styles.smallIconButton}
+                            type="button"
+                            onClick={() => beginRename(chat)}
+                            aria-label={`Rename ${chat.title}`}
+                            title="Rename"
+                          >
+                            ✎
+                          </button>
+
+                          <button
+                            className={styles.smallIconButton}
+                            type="button"
+                            onClick={() =>
+                              deleteConversation(chat.id)
+                            }
+                            aria-label={`Delete ${chat.title}`}
+                            title="Delete"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+
+            <p className={styles.storageNote}>
+              Chats are saved in this browser on this device.
+            </p>
+          </aside>
+        </>
       )}
 
-      <section className={styles.chat} aria-label="Chat conversation">
+      <section
+        className={styles.chat}
+        aria-label="Chat conversation"
+      >
         {messages.length === 0 ? (
           <div className={styles.welcome}>
             <div className={styles.welcomeLogo}>K</div>
-            <p className={styles.eyebrow}>YOUR AI ASSISTANT</p>
+
+            <p className={styles.eyebrow}>
+              YOUR AI ASSISTANT
+            </p>
+
             <h1>
               What can I help you <span>explore?</span>
             </h1>
+
             <p className={styles.subtitle}>
-              Ask questions, learn something new, solve problems, or bring an
-              idea to life.
+              Ask questions, learn something new, solve problems,
+              or bring an idea to life.
             </p>
 
             <div className={styles.suggestions}>
               {[
-                "Explain how AI works",
-                "Help me build a website",
-                "Teach me something interesting",
-              ].map((suggestion) => (
+                {
+                  title: "Learn something new",
+                  prompt:
+                    "Teach me something interesting and explain why it matters.",
+                },
+                {
+                  title: "Build a project",
+                  prompt:
+                    "Help me plan and build a website step by step.",
+                },
+                {
+                  title: "Solve a problem",
+                  prompt:
+                    "Help me solve a problem and explain each step clearly.",
+                },
+              ].map((item) => (
                 <button
-                  key={suggestion}
+                  key={item.title}
                   type="button"
                   className={styles.suggestion}
-                  onClick={() => setInput(suggestion)}
+                  onClick={() => setInput(item.prompt)}
                 >
-                  <span>{suggestion}</span>
-                  <span aria-hidden="true">↗</span>
+                  <span>
+                    <strong>{item.title}</strong>
+                    <small>{item.prompt}</small>
+                  </span>
+
+                  <span
+                    className={styles.suggestionArrow}
+                    aria-hidden="true"
+                  >
+                    ↗
+                  </span>
                 </button>
               ))}
             </div>
@@ -512,12 +715,16 @@ setUserId(savedUserId);
 
                 <div className={styles.messageBody}>
                   <div className={styles.messageLabel}>
-                    {message.role === "user" ? "You" : "Krazy AI"}
+                    {message.role === "user"
+                      ? "You"
+                      : "Krazy AI"}
                   </div>
 
                   <div
                     className={`${styles.messageText} ${
-                      message.isError ? styles.errorText : ""
+                      message.isError
+                        ? styles.errorText
+                        : ""
                     }`}
                   >
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>
@@ -531,18 +738,25 @@ setUserId(savedUserId);
                         <button
                           type="button"
                           onClick={() =>
-                            void copyMessage(message.content, index)
+                            void copyMessage(
+                              message.content,
+                              index
+                            )
                           }
                           title="Copy response"
                         >
-                          {copiedIndex === index ? "✓ Copied" : "Copy"}
+                          {copiedIndex === index
+                            ? "✓ Copied"
+                            : "Copy"}
                         </button>
                       )}
 
                       {message.isError && (
                         <button
                           type="button"
-                          onClick={() => void retryMessage(index)}
+                          onClick={() =>
+                            void retryMessage(index)
+                          }
                           disabled={loading}
                         >
                           ↻ Try again
@@ -557,13 +771,19 @@ setUserId(savedUserId);
             {loading && (
               <div className={styles.thinking}>
                 <div className={styles.avatar}>K</div>
+
                 <div>
-                  <div className={styles.messageLabel}>Krazy AI</div>
+                  <div className={styles.messageLabel}>
+                    Krazy AI
+                  </div>
+
                   <div className={styles.thinkingText}>
                     <span />
                     <span />
                     <span />
-                    <span className={styles.thinkingLabel}>Thinking</span>
+                    <span className={styles.thinkingLabel}>
+                      Thinking
+                    </span>
                   </div>
                 </div>
               </div>
@@ -585,9 +805,14 @@ setUserId(savedUserId);
           <textarea
             ref={inputRef}
             value={input}
-            onChange={(event) => setInput(event.target.value)}
+            onChange={(event) =>
+              setInput(event.target.value)
+            }
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
+              if (
+                event.key === "Enter" &&
+                !event.shiftKey
+              ) {
                 event.preventDefault();
                 void sendMessage();
               }
@@ -596,13 +821,18 @@ setUserId(savedUserId);
             aria-label="Message Krazy AI"
             rows={1}
             maxLength={2000}
-            disabled={loading}
+            disabled={loading || !storageReady}
           />
 
           <button
             className={styles.sendButton}
             type="submit"
-            disabled={loading || !input.trim() || !storageReady || !userId}
+            disabled={
+              loading ||
+              !input.trim() ||
+              !storageReady ||
+              !userId
+            }
             aria-label="Send message"
             title="Send message"
           >
