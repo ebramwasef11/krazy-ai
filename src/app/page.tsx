@@ -21,6 +21,7 @@ type Conversation = {
 
 const WORKER_URL = "https://krazy.ebramw2013.workers.dev";
 const STORAGE_KEY = "krazy-ai-conversations-v1";
+const USER_ID_KEY = "krazy-ai-user-id-v1";
 
 function createChatId(): string {
   return globalThis.crypto?.randomUUID?.() ??
@@ -85,12 +86,21 @@ export default function Home() {
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [storageReady, setStorageReady] = useState(false);
+  const [userId, setUserId] = useState("");
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     try {
+      let savedUserId = window.localStorage.getItem(USER_ID_KEY);
+
+if (!savedUserId) {
+  savedUserId = globalThis.crypto.randomUUID();
+  window.localStorage.setItem(USER_ID_KEY, savedUserId);
+}
+
+setUserId(savedUserId);
       const saved = readConversations(
         window.localStorage.getItem(STORAGE_KEY)
       );
@@ -130,6 +140,7 @@ export default function Home() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        userId,
         messages: history.map(({ role, content }) => ({
           role,
           content,
@@ -178,7 +189,7 @@ export default function Home() {
 
   async function sendMessage() {
     const text = input.trim();
-    if (!text || loading || !storageReady) return;
+    if (!text || loading || !storageReady || !userId) return;
 
     const chatId = activeChatId ?? createChatId();
     const history: Message[] = [
@@ -591,7 +602,7 @@ export default function Home() {
           <button
             className={styles.sendButton}
             type="submit"
-            disabled={loading || !input.trim() || !storageReady}
+            disabled={loading || !input.trim() || !storageReady || !userId}
             aria-label="Send message"
             title="Send message"
           >
