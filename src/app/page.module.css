@@ -819,3 +819,15 @@
     transition-duration: 0.01ms !important;
   }
 }
+.streamingCursor {
+  display: inline-block;
+  margin-left: 3px;
+  color: var(--accent, #e04444);
+  animation: krazyBlink 0.8s steps(2, start) infinite;
+}
+
+@keyframes krazyBlink {
+  to {
+    visibility: hidden;
+  }
+}

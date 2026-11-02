@@ -165,6 +165,7 @@ export default function Home() {
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [streaming, setStreaming] = useState(false);
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historySearch, setHistorySearch] = useState("");
@@ -252,79 +253,194 @@ export default function Home() {
     );
   }, [conversations, historySearch]);
 
-  // Send the conversation to the existing Cloudflare Worker.
-  async function getAnswer(history: Message[]): Promise<string> {
-    const controller = new AbortController();
+  async function getAnswer(
+  history: Message[],
+  onChunk: (fullText: string) => void
+): Promise<string> {
+  const controller = new AbortController();
 
-    const timeout = window.setTimeout(
-      () => controller.abort(),
-      REQUEST_TIMEOUT
-    );
+  const timeout = window.setTimeout(
+    () => controller.abort(),
+    REQUEST_TIMEOUT
+  );
 
-    try {
-      const response = await fetch(WORKER_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          userId,
-          messages: history
-            .slice(-MAX_HISTORY_MESSAGES)
-            .map(({ role, content }) => ({
-              role,
-              content,
-            })),
-        }),
-      });
+  try {
+    const response = await fetch(WORKER_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        userId,
+        stream: true,
+        messages: history
+          .slice(-MAX_HISTORY_MESSAGES)
+          .map(({ role, content }) => ({
+            role,
+            content,
+          })),
+      }),
+    });
 
-      const data = await response.json().catch(
-        () => ({}) as WorkerResponse
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+
+      throw new Error(
+        typeof data.error === "string"
+          ? data.error
+          : `The server returned error ${response.status}.`
       );
-
-      if (!response.ok) {
-        const serverError =
-          typeof data.error === "string"
-            ? data.error
-            : `The server returned error ${response.status}.`;
-
-        throw new Error(serverError);
-      }
-
-      const answer = extractAnswer(data);
-
-      if (!answer) {
-        throw new Error(
-          "Krazy AI received an empty response. Please try again."
-        );
-      }
-
-      return answer;
-    } catch (error) {
-      if (
-        error instanceof DOMException &&
-        error.name === "AbortError"
-      ) {
-        throw new Error(
-          "The request took too long. Please try again."
-        );
-      }
-
-      if (
-        error instanceof TypeError &&
-        error.message.toLowerCase().includes("fetch")
-      ) {
-        throw new Error(
-          "Could not connect to Krazy AI. Check your internet connection and try again."
-        );
-      }
-
-      throw error;
-    } finally {
-      window.clearTimeout(timeout);
     }
+
+    if (!response.body) {
+      throw new Error("The server did not provide a response stream.");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    let buffer = "";
+    let answer = "";
+    let finished = false;
+
+    function processEvent(event: string) {
+      const dataLines = event
+        .split("\n")
+        .filter(line => line.startsWith("data:"))
+        .map(line => line.slice(5).trim());
+
+      for (const dataLine of dataLines) {
+        if (!dataLine || dataLine === "[DONE]") {
+          continue;
+        }
+
+        let parsed: Record<string, unknown>;
+
+        try {
+          parsed = JSON.parse(dataLine);
+        } catch {
+          continue;
+        }
+
+        const choices = parsed.choices as
+          | Array<Record<string, unknown>>
+          | undefined;
+
+        const choice = choices?.[0];
+
+        const delta = choice?.delta as
+          | Record<string, unknown>
+          | undefined;
+
+        const message = choice?.message as
+          | Record<string, unknown>
+          | undefined;
+
+        const candidates = [
+          delta?.content,
+          message?.content,
+          choice?.text,
+          parsed.response,
+          parsed.output_text,
+        ];
+
+        for (const candidate of candidates) {
+          let text = "";
+
+          if (typeof candidate === "string") {
+            text = candidate;
+          } else if (Array.isArray(candidate)) {
+            text = candidate
+              .map(part => {
+                if (typeof part === "string") return part;
+
+                if (
+                  part &&
+                  typeof part === "object" &&
+                  "text" in part &&
+                  typeof part.text === "string"
+                ) {
+                  return part.text;
+                }
+
+                return "";
+              })
+              .join("");
+          }
+
+          if (text) {
+            answer += text;
+            onChunk(answer);
+            break;
+          }
+        }
+
+        if (parsed.error) {
+          throw new Error(
+            typeof parsed.error === "string"
+              ? parsed.error
+              : "The AI stream returned an error."
+          );
+        }
+      }
+    }
+
+    while (!finished) {
+      const { value, done } = await reader.read();
+
+      if (done) {
+        finished = true;
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+
+      const events = buffer.split(/\r?\n\r?\n/);
+      buffer = events.pop() || "";
+
+      for (const event of events) {
+        processEvent(event);
+      }
+    }
+
+    buffer += decoder.decode();
+
+    if (buffer.trim()) {
+      processEvent(buffer);
+    }
+
+    if (!answer.trim()) {
+      throw new Error(
+        "Krazy AI returned an empty response. Please try again."
+      );
+    }
+
+    return answer.trim();
+  } catch (error) {
+    if (
+      error instanceof DOMException &&
+      error.name === "AbortError"
+    ) {
+      throw new Error(
+        "The request took too long. Please try again."
+      );
+    }
+
+    if (
+      error instanceof TypeError &&
+      error.message.toLowerCase().includes("fetch")
+    ) {
+      throw new Error(
+        "Could not connect to Krazy AI. Check your internet connection and try again."
+      );
+    }
+
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
   }
+}
 
   // Update the active chat and save it in history.
   function saveConversation(
@@ -354,98 +470,121 @@ export default function Home() {
     });
   }
 
-  // Send a new user message.
-  async function sendMessage() {
-    const text = input.trim();
+async function sendMessage() {
+  const text = input.trim();
 
-    if (
-      !text ||
-      requestInProgress.current ||
-      !storageReady ||
-      !userId
-    ) {
-      return;
-    }
-
-    requestInProgress.current = true;
-
-    const chatId = activeChatId ?? createChatId();
-
-    const history: Message[] = [
-      ...messages,
-      { role: "user", content: text },
-    ];
-
-    setActiveChatId(chatId);
-    setInput("");
-    setLoading(true);
-    setHistoryOpen(false);
-
-    saveConversation(chatId, history);
-
-    try {
-      const answer = await getAnswer(history);
-
-      saveConversation(chatId, [
-        ...history,
-        { role: "assistant", content: answer },
-      ]);
-    } catch (error) {
-      saveConversation(chatId, [
-        ...history,
-        {
-          role: "assistant",
-          content: `I couldn't complete that request. ${getErrorMessage(error)}`,
-          isError: true,
-        },
-      ]);
-    } finally {
-      requestInProgress.current = false;
-      setLoading(false);
-      inputRef.current?.focus();
-    }
+  if (
+    !text ||
+    requestInProgress.current ||
+    !storageReady ||
+    !userId
+  ) {
+    return;
   }
 
-  // Retry a failed assistant response.
-  async function retryMessage(index: number) {
-    if (
-      requestInProgress.current ||
-      !activeChatId
-    ) {
-      return;
-    }
+  requestInProgress.current = true;
 
-    const history = messages.slice(0, index);
+  const chatId = activeChatId ?? createChatId();
 
-    if (history.at(-1)?.role !== "user") return;
+  const history: Message[] = [
+    ...messages,
+    { role: "user", content: text },
+  ];
 
-    requestInProgress.current = true;
+  const initialMessages: Message[] = [
+    ...history,
+    { role: "assistant", content: "" },
+  ];
 
-    setLoading(true);
-    saveConversation(activeChatId, history);
+  setActiveChatId(chatId);
+  setInput("");
+  setLoading(true);
+  setStreaming(true);
+  setHistoryOpen(false);
 
-    try {
-      const answer = await getAnswer(history);
+  saveConversation(chatId, initialMessages);
 
-      saveConversation(activeChatId, [
+  try {
+    const answer = await getAnswer(history, (fullText) => {
+      saveConversation(chatId, [
         ...history,
-        { role: "assistant", content: answer },
+        { role: "assistant", content: fullText },
       ]);
-    } catch (error) {
-      saveConversation(activeChatId, [
-        ...history,
-        {
-          role: "assistant",
-          content: `I couldn't complete that request. ${getErrorMessage(error)}`,
-          isError: true,
-        },
-      ]);
-    } finally {
-      requestInProgress.current = false;
-      setLoading(false);
-      inputRef.current?.focus();
-    }
+    });
+
+    saveConversation(chatId, [
+      ...history,
+      { role: "assistant", content: answer },
+    ]);
+  } catch (error) {
+    saveConversation(chatId, [
+      ...history,
+      {
+        role: "assistant",
+        content: `I couldn't complete that request. ${getErrorMessage(error)}`,
+        isError: true,
+      },
+    ]);
+  } finally {
+    requestInProgress.current = false;
+    setLoading(false);
+    setStreaming(false);
+    inputRef.current?.focus();
   }
+}
+
+async function retryMessage(index: number) {
+  if (
+    requestInProgress.current ||
+    !activeChatId
+  ) {
+    return;
+  }
+
+  const history = messages.slice(0, index);
+
+  if (history.at(-1)?.role !== "user") return;
+
+  requestInProgress.current = true;
+
+  setLoading(true);
+  setStreaming(true);
+
+  const chatId = activeChatId;
+
+  saveConversation(chatId, [
+    ...history,
+    { role: "assistant", content: "" },
+  ]);
+
+  try {
+    const answer = await getAnswer(history, (fullText) => {
+      saveConversation(chatId, [
+        ...history,
+        { role: "assistant", content: fullText },
+      ]);
+    });
+
+    saveConversation(chatId, [
+      ...history,
+      { role: "assistant", content: answer },
+    ]);
+  } catch (error) {
+    saveConversation(chatId, [
+      ...history,
+      {
+        role: "assistant",
+        content: `I couldn't complete that request. ${getErrorMessage(error)}`,
+        isError: true,
+      },
+    ]);
+  } finally {
+    requestInProgress.current = false;
+    setLoading(false);
+    setStreaming(false);
+    inputRef.current?.focus();
+  }
+}
 
   // Copy an assistant response.
   async function copyMessage(content: string, index: number) {
@@ -864,6 +1003,12 @@ export default function Home() {
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>
                       {message.content}
                     </ReactMarkdown>
+
+                    {streaming &&
+                      message.role === "assistant" &&
+                      index === messages.length - 1 && (
+                        <span className={styles.streamingCursor}>▍</span>
+                      )}
                   </div>
 
                   {message.role === "assistant" && (
@@ -902,7 +1047,7 @@ export default function Home() {
               </article>
             ))}
 
-            {loading && (
+            {loading && !streaming && (
               <div className={styles.thinking}>
                 <div className={styles.avatar}>K</div>
 
