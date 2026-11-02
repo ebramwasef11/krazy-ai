@@ -19,21 +19,56 @@ type Conversation = {
   updatedAt: string;
 };
 
+type WorkerResponse = {
+  error?: unknown;
+  response?: unknown;
+  result?: {
+    response?: unknown;
+    choices?: Array<{
+      message?: { content?: unknown };
+      text?: unknown;
+    }>;
+  };
+  choices?: Array<{
+    message?: { content?: unknown };
+    text?: unknown;
+  }>;
+  output_text?: unknown;
+};
+
 const WORKER_URL = "https://krazy.ebramw2013.workers.dev";
 const STORAGE_KEY = "krazy-ai-conversations-v1";
 const USER_ID_KEY = "krazy-ai-user-id-v1";
 
-function createChatId(): string {
+const REQUEST_TIMEOUT = 90000;
+const MAX_MESSAGE_LENGTH = 2000;
+const MAX_HISTORY_MESSAGES = 20;
+
+function createId(prefix: string): string {
   return globalThis.crypto?.randomUUID?.() ??
-    `chat-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function createChatId(): string {
+  return createId("chat");
+}
+
+function createUserId(): string {
+  return createId("user");
 }
 
 function getTitle(messages: Message[]): string {
-  const firstMessage = messages.find((message) => message.role === "user");
+  const firstMessage = messages.find(
+    (message) => message.role === "user"
+  );
+
   if (!firstMessage) return "New chat";
 
   const text = firstMessage.content.replace(/\s+/g, " ").trim();
-  return text.length > 42 ? `${text.slice(0, 42)}…` : text;
+
+  return text.length > 42
+    ? `${text.slice(0, 42)}…`
+    : text;
 }
 
 function readConversations(value: string | null): Conversation[] {
@@ -41,6 +76,7 @@ function readConversations(value: string | null): Conversation[] {
 
   try {
     const parsed: unknown = JSON.parse(value);
+
     if (!Array.isArray(parsed)) return [];
 
     return parsed
@@ -56,20 +92,71 @@ function readConversations(value: string | null): Conversation[] {
         id: item.id,
         title: item.title,
         updatedAt: item.updatedAt,
-        messages: item.messages.filter((message: unknown): message is Message =>
-          message !== null &&
-          typeof message === "object" &&
-          ["user", "assistant"].includes((message as Message).role) &&
-          typeof (message as Message).content === "string"
+        messages: item.messages.filter(
+          (message: unknown): message is Message =>
+            message !== null &&
+            typeof message === "object" &&
+            ["user", "assistant"].includes(
+              (message as Message).role
+            ) &&
+            typeof (message as Message).content === "string"
         ),
       }))
-      .sort((a, b) =>
-        new Date(b.updatedAt).getTime() -
-        new Date(a.updatedAt).getTime()
+      .sort(
+        (a, b) =>
+          new Date(b.updatedAt).getTime() -
+          new Date(a.updatedAt).getTime()
       );
   } catch {
     return [];
   }
+}
+
+function extractAnswer(data: WorkerResponse): string | null {
+  const candidates = [
+    data.choices?.[0]?.message?.content,
+    data.choices?.[0]?.text,
+    data.response,
+    data.result?.response,
+    data.result?.choices?.[0]?.message?.content,
+    data.result?.choices?.[0]?.text,
+    data.output_text,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+
+    if (Array.isArray(candidate)) {
+      const combined = candidate
+        .map((part) => {
+          if (typeof part === "string") return part;
+
+          if (
+            part &&
+            typeof part === "object" &&
+            "text" in part &&
+            typeof part.text === "string"
+          ) {
+            return part.text;
+          }
+
+          return "";
+        })
+        .join("");
+
+      if (combined.trim()) return combined.trim();
+    }
+  }
+
+  return null;
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+
+  return "An unexpected error occurred. Please try again.";
 }
 
 export default function Home() {
@@ -86,18 +173,19 @@ export default function Home() {
   const [storageReady, setStorageReady] = useState(false);
   const [userId, setUserId] = useState("");
 
+  const requestInProgress = useRef(false);
+
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const renameRef = useRef<HTMLInputElement>(null);
 
+  // Load saved chats and the browser's existing memory ID.
   useEffect(() => {
     try {
       let savedUserId = window.localStorage.getItem(USER_ID_KEY);
 
       if (!savedUserId) {
-        savedUserId = globalThis.crypto?.randomUUID?.() ??
-          `user-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
+        savedUserId = createUserId();
         window.localStorage.setItem(USER_ID_KEY, savedUserId);
       }
 
@@ -120,6 +208,7 @@ export default function Home() {
     }
   }, []);
 
+  // Save conversations whenever they change.
   useEffect(() => {
     if (!storageReady) return;
 
@@ -133,6 +222,7 @@ export default function Home() {
     }
   }, [conversations, storageReady]);
 
+  // Keep the latest message visible.
   useEffect(() => {
     bottomRef.current?.scrollIntoView({
       behavior: "smooth",
@@ -140,6 +230,7 @@ export default function Home() {
     });
   }, [messages, loading]);
 
+  // Focus the rename field when editing a chat title.
   useEffect(() => {
     if (renamingChatId) {
       renameRef.current?.focus();
@@ -152,20 +243,22 @@ export default function Home() {
 
     if (!query) return conversations;
 
-    return conversations.filter((chat) =>
-      chat.title.toLowerCase().includes(query) ||
-      chat.messages.some((message) =>
-        message.content.toLowerCase().includes(query)
-      )
+    return conversations.filter(
+      (chat) =>
+        chat.title.toLowerCase().includes(query) ||
+        chat.messages.some((message) =>
+          message.content.toLowerCase().includes(query)
+        )
     );
   }, [conversations, historySearch]);
 
+  // Send the conversation to the existing Cloudflare Worker.
   async function getAnswer(history: Message[]): Promise<string> {
     const controller = new AbortController();
 
     const timeout = window.setTimeout(
       () => controller.abort(),
-      90000
+      REQUEST_TIMEOUT
     );
 
     try {
@@ -177,36 +270,37 @@ export default function Home() {
         signal: controller.signal,
         body: JSON.stringify({
           userId,
-          messages: history.map(({ role, content }) => ({
-            role,
-            content,
-          })),
+          messages: history
+            .slice(-MAX_HISTORY_MESSAGES)
+            .map(({ role, content }) => ({
+              role,
+              content,
+            })),
         }),
       });
 
-      const data = await response.json().catch(() => ({}));
+      const data = await response.json().catch(
+        () => ({}) as WorkerResponse
+      );
 
       if (!response.ok) {
-        throw new Error(
+        const serverError =
           typeof data.error === "string"
             ? data.error
-            : `Request failed (${response.status}).`
-        );
+            : `The server returned error ${response.status}.`;
+
+        throw new Error(serverError);
       }
 
-      const answer =
-        data.choices?.[0]?.message?.content ??
-        data.response ??
-        data.result?.response ??
-        data.result?.choices?.[0]?.message?.content;
+      const answer = extractAnswer(data);
 
-      if (typeof answer !== "string" || !answer.trim()) {
+      if (!answer) {
         throw new Error(
-          "The AI returned an empty answer. Please try again."
+          "Krazy AI received an empty response. Please try again."
         );
       }
 
-      return answer.trim();
+      return answer;
     } catch (error) {
       if (
         error instanceof DOMException &&
@@ -217,12 +311,22 @@ export default function Home() {
         );
       }
 
+      if (
+        error instanceof TypeError &&
+        error.message.toLowerCase().includes("fetch")
+      ) {
+        throw new Error(
+          "Could not connect to Krazy AI. Check your internet connection and try again."
+        );
+      }
+
       throw error;
     } finally {
       window.clearTimeout(timeout);
     }
   }
 
+  // Update the active chat and save it in history.
   function saveConversation(
     chatId: string,
     nextMessages: Message[]
@@ -250,10 +354,20 @@ export default function Home() {
     });
   }
 
+  // Send a new user message.
   async function sendMessage() {
     const text = input.trim();
 
-    if (!text || loading || !storageReady || !userId) return;
+    if (
+      !text ||
+      requestInProgress.current ||
+      !storageReady ||
+      !userId
+    ) {
+      return;
+    }
+
+    requestInProgress.current = true;
 
     const chatId = activeChatId ?? createChatId();
 
@@ -277,31 +391,35 @@ export default function Home() {
         { role: "assistant", content: answer },
       ]);
     } catch (error) {
-      const reason =
-        error instanceof Error
-          ? error.message
-          : "An unexpected error occurred.";
-
       saveConversation(chatId, [
         ...history,
         {
           role: "assistant",
-          content: `I couldn't complete that request. ${reason}`,
+          content: `I couldn't complete that request. ${getErrorMessage(error)}`,
           isError: true,
         },
       ]);
     } finally {
+      requestInProgress.current = false;
       setLoading(false);
       inputRef.current?.focus();
     }
   }
 
+  // Retry a failed assistant response.
   async function retryMessage(index: number) {
-    if (loading || !activeChatId) return;
+    if (
+      requestInProgress.current ||
+      !activeChatId
+    ) {
+      return;
+    }
 
     const history = messages.slice(0, index);
 
     if (history.at(-1)?.role !== "user") return;
+
+    requestInProgress.current = true;
 
     setLoading(true);
     saveConversation(activeChatId, history);
@@ -314,60 +432,68 @@ export default function Home() {
         { role: "assistant", content: answer },
       ]);
     } catch (error) {
-      const reason =
-        error instanceof Error
-          ? error.message
-          : "An unexpected error occurred.";
-
       saveConversation(activeChatId, [
         ...history,
         {
           role: "assistant",
-          content: `I couldn't complete that request. ${reason}`,
+          content: `I couldn't complete that request. ${getErrorMessage(error)}`,
           isError: true,
         },
       ]);
     } finally {
+      requestInProgress.current = false;
       setLoading(false);
+      inputRef.current?.focus();
     }
   }
 
+  // Copy an assistant response.
   async function copyMessage(content: string, index: number) {
     try {
       await navigator.clipboard.writeText(content);
 
       setCopiedIndex(index);
-      window.setTimeout(() => setCopiedIndex(null), 1500);
+
+      window.setTimeout(() => {
+        setCopiedIndex((current) =>
+          current === index ? null : current
+        );
+      }, 1500);
     } catch {
-      // Clipboard access may be blocked by browser permissions.
+      console.error("Clipboard access was blocked.");
     }
   }
 
+  // Start a blank conversation.
   function startNewChat() {
-    if (loading) return;
+    if (requestInProgress.current) return;
 
     setActiveChatId(null);
     setMessages([]);
     setInput("");
     setHistoryOpen(false);
     setHistorySearch("");
+    setRenamingChatId(null);
 
     inputRef.current?.focus();
   }
 
+  // Open a saved conversation.
   function openConversation(chat: Conversation) {
-    if (loading) return;
+    if (requestInProgress.current) return;
 
     setActiveChatId(chat.id);
     setMessages(chat.messages);
     setInput("");
     setHistoryOpen(false);
+    setRenamingChatId(null);
 
     inputRef.current?.focus();
   }
 
+  // Delete a saved conversation.
   function deleteConversation(chatId: string) {
-    if (loading) return;
+    if (requestInProgress.current) return;
 
     const remaining = conversations.filter(
       (chat) => chat.id !== chatId
@@ -385,11 +511,15 @@ export default function Home() {
     }
   }
 
+  // Begin editing a conversation title.
   function beginRename(chat: Conversation) {
+    if (requestInProgress.current) return;
+
     setRenamingChatId(chat.id);
     setRenameValue(chat.title);
   }
 
+  // Save an edited conversation title.
   function saveRename(chatId: string) {
     const title = renameValue
       .replace(/\s+/g, " ")
@@ -516,6 +646,7 @@ export default function Home() {
               className={styles.panelNewChat}
               type="button"
               onClick={startNewChat}
+              disabled={loading}
             >
               <span aria-hidden="true">＋</span> Start a new chat
             </button>
@@ -575,9 +706,10 @@ export default function Home() {
 
                         <button
                           type="button"
-                          onClick={() =>
-                            setRenamingChatId(null)
-                          }
+                          onClick={() => {
+                            setRenamingChatId(null);
+                            setRenameValue("");
+                          }}
                           aria-label="Cancel rename"
                           title="Cancel"
                         >
@@ -606,6 +738,7 @@ export default function Home() {
                             className={styles.smallIconButton}
                             type="button"
                             onClick={() => beginRename(chat)}
+                            disabled={loading}
                             aria-label={`Rename ${chat.title}`}
                             title="Rename"
                           >
@@ -618,6 +751,7 @@ export default function Home() {
                             onClick={() =>
                               deleteConversation(chat.id)
                             }
+                            disabled={loading}
                             aria-label={`Delete ${chat.title}`}
                             title="Delete"
                           >
@@ -820,7 +954,7 @@ export default function Home() {
             placeholder="Message Krazy AI..."
             aria-label="Message Krazy AI"
             rows={1}
-            maxLength={2000}
+            maxLength={MAX_MESSAGE_LENGTH}
             disabled={loading || !storageReady}
           />
 
