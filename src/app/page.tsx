@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import styles from "./page.module.css";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -19,23 +19,6 @@ type Conversation = {
   updatedAt: string;
 };
 
-type WorkerResponse = {
-  error?: unknown;
-  response?: unknown;
-  result?: {
-    response?: unknown;
-    choices?: Array<{
-      message?: { content?: unknown };
-      text?: unknown;
-    }>;
-  };
-  choices?: Array<{
-    message?: { content?: unknown };
-    text?: unknown;
-  }>;
-  output_text?: unknown;
-};
-
 const WORKER_URL = "https://krazy.ebramw2013.workers.dev";
 const STORAGE_KEY = "krazy-ai-conversations-v1";
 const USER_ID_KEY = "krazy-ai-user-id-v1";
@@ -43,32 +26,21 @@ const USER_ID_KEY = "krazy-ai-user-id-v1";
 const REQUEST_TIMEOUT = 90000;
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_HISTORY_MESSAGES = 20;
+const MAX_CONVERSATIONS = 100;
 
 function createId(prefix: string): string {
-  return globalThis.crypto?.randomUUID?.() ??
-    `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function createChatId(): string {
-  return createId("chat");
-}
-
-function createUserId(): string {
-  return createId("user");
+  return (
+    globalThis.crypto?.randomUUID?.() ??
+    `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  );
 }
 
 function getTitle(messages: Message[]): string {
-  const firstMessage = messages.find(
-    (message) => message.role === "user"
-  );
+  const first = messages.find((message) => message.role === "user");
+  if (!first) return "New chat";
 
-  if (!firstMessage) return "New chat";
-
-  const text = firstMessage.content.replace(/\s+/g, " ").trim();
-
-  return text.length > 42
-    ? `${text.slice(0, 42)}…`
-    : text;
+  const title = first.content.replace(/\s+/g, " ").trim();
+  return title.length > 42 ? `${title.slice(0, 42)}…` : title;
 }
 
 function readConversations(value: string | null): Conversation[] {
@@ -76,17 +48,17 @@ function readConversations(value: string | null): Conversation[] {
 
   try {
     const parsed: unknown = JSON.parse(value);
-
     if (!Array.isArray(parsed)) return [];
 
     return parsed
-      .filter((item): item is Conversation =>
-        item !== null &&
-        typeof item === "object" &&
-        typeof item.id === "string" &&
-        typeof item.title === "string" &&
-        typeof item.updatedAt === "string" &&
-        Array.isArray(item.messages)
+      .filter(
+        (item): item is Conversation =>
+          item !== null &&
+          typeof item === "object" &&
+          typeof item.id === "string" &&
+          typeof item.title === "string" &&
+          typeof item.updatedAt === "string" &&
+          Array.isArray(item.messages)
       )
       .map((item) => ({
         id: item.id,
@@ -96,9 +68,7 @@ function readConversations(value: string | null): Conversation[] {
           (message: unknown): message is Message =>
             message !== null &&
             typeof message === "object" &&
-            ["user", "assistant"].includes(
-              (message as Message).role
-            ) &&
+            ["user", "assistant"].includes((message as Message).role) &&
             typeof (message as Message).content === "string"
         ),
       }))
@@ -106,27 +76,37 @@ function readConversations(value: string | null): Conversation[] {
         (a, b) =>
           new Date(b.updatedAt).getTime() -
           new Date(a.updatedAt).getTime()
-      );
+      )
+      .slice(0, MAX_CONVERSATIONS);
   } catch {
     return [];
   }
 }
 
-function extractAnswer(data: WorkerResponse): string | null {
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return "An unexpected error occurred. Please try again.";
+}
+
+function extractChunk(parsed: Record<string, unknown>): string {
+  const choices = parsed.choices as
+    | Array<Record<string, unknown>>
+    | undefined;
+
+  const choice = choices?.[0];
+  const delta = choice?.delta as Record<string, unknown> | undefined;
+  const message = choice?.message as Record<string, unknown> | undefined;
+
   const candidates = [
-    data.choices?.[0]?.message?.content,
-    data.choices?.[0]?.text,
-    data.response,
-    data.result?.response,
-    data.result?.choices?.[0]?.message?.content,
-    data.result?.choices?.[0]?.text,
-    data.output_text,
+    delta?.content,
+    message?.content,
+    choice?.text,
+    parsed.response,
+    parsed.output_text,
   ];
 
   for (const candidate of candidates) {
-    if (typeof candidate === "string" && candidate.trim()) {
-      return candidate.trim();
-    }
+    if (typeof candidate === "string") return candidate;
 
     if (Array.isArray(candidate)) {
       const combined = candidate
@@ -146,47 +126,44 @@ function extractAnswer(data: WorkerResponse): string | null {
         })
         .join("");
 
-      if (combined.trim()) return combined.trim();
+      if (combined) return combined;
     }
   }
 
-  return null;
-}
-
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-
-  return "An unexpected error occurred. Please try again.";
+  return "";
 }
 
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
+
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
+  const [hasReceivedFirstChunk, setHasReceivedFirstChunk] = useState(false);
+
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [historySearch, setHistorySearch] = useState("");
+
   const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+
   const [storageReady, setStorageReady] = useState(false);
   const [userId, setUserId] = useState("");
 
   const requestInProgress = useRef(false);
-
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const renameRef = useRef<HTMLInputElement>(null);
 
-  // Load saved chats and the browser's existing memory ID.
+  // Load conversations and the persistent browser user ID.
   useEffect(() => {
     try {
       let savedUserId = window.localStorage.getItem(USER_ID_KEY);
 
       if (!savedUserId) {
-        savedUserId = createUserId();
+        savedUserId = createId("user");
         window.localStorage.setItem(USER_ID_KEY, savedUserId);
       }
 
@@ -209,29 +186,29 @@ export default function Home() {
     }
   }, []);
 
-  // Save conversations whenever they change.
+  // Save chat history locally.
   useEffect(() => {
     if (!storageReady) return;
 
     try {
       window.localStorage.setItem(
         STORAGE_KEY,
-        JSON.stringify(conversations)
+        JSON.stringify(conversations.slice(0, MAX_CONVERSATIONS))
       );
     } catch (error) {
       console.error("Could not save Krazy AI chats:", error);
     }
   }, [conversations, storageReady]);
 
-  // Keep the latest message visible.
+  // Keep the newest message visible.
   useEffect(() => {
     bottomRef.current?.scrollIntoView({
-      behavior: "smooth",
+      behavior: streaming ? "auto" : "smooth",
       block: "end",
     });
-  }, [messages, loading]);
+  }, [messages, loading, streaming]);
 
-  // Focus the rename field when editing a chat title.
+  // Focus the rename field.
   useEffect(() => {
     if (renamingChatId) {
       renameRef.current?.focus();
@@ -239,6 +216,16 @@ export default function Home() {
     }
   }, [renamingChatId]);
 
+  // Automatically resize the composer.
+  useEffect(() => {
+    const textarea = inputRef.current;
+    if (!textarea) return;
+
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`;
+  }, [input]);
+
+  // Search titles and message contents.
   const filteredConversations = useMemo(() => {
     const query = historySearch.trim().toLowerCase();
 
@@ -253,367 +240,316 @@ export default function Home() {
     );
   }, [conversations, historySearch]);
 
-  async function getAnswer(
-  history: Message[],
-  onChunk: (fullText: string) => void
-): Promise<string> {
-  const controller = new AbortController();
+  // Update the current conversation and its saved history.
+  const saveConversation = useCallback(
+    (chatId: string, nextMessages: Message[]) => {
+      setMessages(nextMessages);
 
-  const timeout = window.setTimeout(
-    () => controller.abort(),
-    REQUEST_TIMEOUT
+      if (nextMessages.length === 0) return;
+
+      setConversations((previous) => {
+        const existing = previous.find((chat) => chat.id === chatId);
+
+        const conversation: Conversation = {
+          id: chatId,
+          title: existing?.title || getTitle(nextMessages),
+          messages: nextMessages,
+          updatedAt: new Date().toISOString(),
+        };
+
+        return [
+          conversation,
+          ...previous.filter((chat) => chat.id !== chatId),
+        ].slice(0, MAX_CONVERSATIONS);
+      });
+    },
+    []
   );
 
-  try {
-    const response = await fetch(WORKER_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        userId,
-        stream: true,
-        messages: history
-          .slice(-MAX_HISTORY_MESSAGES)
-          .map(({ role, content }) => ({
-            role,
-            content,
-          })),
-      }),
-    });
+  // Read the response stream from the Cloudflare Worker.
+  async function getAnswer(
+    history: Message[],
+    onChunk: (fullText: string) => void
+  ): Promise<string> {
+    const controller = new AbortController();
 
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
+    const timeout = window.setTimeout(
+      () => controller.abort(),
+      REQUEST_TIMEOUT
+    );
 
-      throw new Error(
-        typeof data.error === "string"
-          ? data.error
-          : `The server returned error ${response.status}.`
-      );
-    }
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
-    if (!response.body) {
-      throw new Error("The server did not provide a response stream.");
-    }
+    try {
+      const response = await fetch(WORKER_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          userId,
+          stream: true,
+          messages: history
+            .slice(-MAX_HISTORY_MESSAGES)
+            .map(({ role, content }) => ({ role, content })),
+        }),
+      });
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
 
-    let buffer = "";
-    let answer = "";
-    let finished = false;
+        throw new Error(
+          typeof data.error === "string"
+            ? data.error
+            : `The server returned error ${response.status}.`
+        );
+      }
 
-    function processEvent(event: string) {
-      const dataLines = event
-        .split("\n")
-        .filter(line => line.startsWith("data:"))
-        .map(line => line.slice(5).trim());
+      if (!response.body) {
+        throw new Error("The server did not provide a response stream.");
+      }
 
-      for (const dataLine of dataLines) {
-        if (!dataLine || dataLine === "[DONE]") {
-          continue;
-        }
+      reader = response.body.getReader();
 
-        let parsed: Record<string, unknown>;
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let answer = "";
 
-        try {
-          parsed = JSON.parse(dataLine);
-        } catch {
-          continue;
-        }
+      function processEvent(event: string) {
+        const dataLines = event
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim());
 
-        const choices = parsed.choices as
-          | Array<Record<string, unknown>>
-          | undefined;
+        for (const dataLine of dataLines) {
+          if (!dataLine || dataLine === "[DONE]") continue;
 
-        const choice = choices?.[0];
+          let parsed: Record<string, unknown>;
 
-        const delta = choice?.delta as
-          | Record<string, unknown>
-          | undefined;
-
-        const message = choice?.message as
-          | Record<string, unknown>
-          | undefined;
-
-        const candidates = [
-          delta?.content,
-          message?.content,
-          choice?.text,
-          parsed.response,
-          parsed.output_text,
-        ];
-
-        for (const candidate of candidates) {
-          let text = "";
-
-          if (typeof candidate === "string") {
-            text = candidate;
-          } else if (Array.isArray(candidate)) {
-            text = candidate
-              .map(part => {
-                if (typeof part === "string") return part;
-
-                if (
-                  part &&
-                  typeof part === "object" &&
-                  "text" in part &&
-                  typeof part.text === "string"
-                ) {
-                  return part.text;
-                }
-
-                return "";
-              })
-              .join("");
+          try {
+            parsed = JSON.parse(dataLine);
+          } catch {
+            continue;
           }
 
-          if (text) {
-            answer += text;
+          if (parsed.error) {
+            throw new Error(
+              typeof parsed.error === "string"
+                ? parsed.error
+                : "The AI stream returned an error."
+            );
+          }
+
+          const chunk = extractChunk(parsed);
+
+          if (chunk) {
+            answer += chunk;
             onChunk(answer);
-            break;
           }
         }
+      }
 
-        if (parsed.error) {
-          throw new Error(
-            typeof parsed.error === "string"
-              ? parsed.error
-              : "The AI stream returned an error."
-          );
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        const events = buffer.split(/\r?\n\r?\n/);
+        buffer = events.pop() || "";
+
+        for (const event of events) {
+          processEvent(event);
         }
       }
-    }
 
-    while (!finished) {
-      const { value, done } = await reader.read();
+      buffer += decoder.decode();
 
-      if (done) {
-        finished = true;
-        break;
+      if (buffer.trim()) {
+        processEvent(buffer);
       }
 
-      buffer += decoder.decode(value, { stream: true });
-
-      const events = buffer.split(/\r?\n\r?\n/);
-      buffer = events.pop() || "";
-
-      for (const event of events) {
-        processEvent(event);
+      if (!answer.trim()) {
+        throw new Error(
+          "Krazy AI returned an empty response. Please try again."
+        );
       }
+
+      return answer.trim();
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new Error("The request took too long. Please try again.");
+      }
+
+      if (
+        error instanceof TypeError &&
+        error.message.toLowerCase().includes("fetch")
+      ) {
+        throw new Error(
+          "Could not connect to Krazy AI. Check your internet connection and try again."
+        );
+      }
+
+      throw error;
+    } finally {
+      if (reader) {
+        void reader.cancel().catch(() => undefined);
+      }
+
+      window.clearTimeout(timeout);
     }
-
-    buffer += decoder.decode();
-
-    if (buffer.trim()) {
-      processEvent(buffer);
-    }
-
-    if (!answer.trim()) {
-      throw new Error(
-        "Krazy AI returned an empty response. Please try again."
-      );
-    }
-
-    return answer.trim();
-  } catch (error) {
-    if (
-      error instanceof DOMException &&
-      error.name === "AbortError"
-    ) {
-      throw new Error(
-        "The request took too long. Please try again."
-      );
-    }
-
-    if (
-      error instanceof TypeError &&
-      error.message.toLowerCase().includes("fetch")
-    ) {
-      throw new Error(
-        "Could not connect to Krazy AI. Check your internet connection and try again."
-      );
-    }
-
-    throw error;
-  } finally {
-    window.clearTimeout(timeout);
-  }
-}
-
-  // Update the active chat and save it in history.
-  function saveConversation(
-    chatId: string,
-    nextMessages: Message[]
-  ) {
-    setMessages(nextMessages);
-
-    if (nextMessages.length === 0) return;
-
-    setConversations((previous) => {
-      const existing = previous.find(
-        (chat) => chat.id === chatId
-      );
-
-      const conversation: Conversation = {
-        id: chatId,
-        title: existing?.title || getTitle(nextMessages),
-        messages: nextMessages,
-        updatedAt: new Date().toISOString(),
-      };
-
-      return [
-        conversation,
-        ...previous.filter((chat) => chat.id !== chatId),
-      ];
-    });
   }
 
-async function sendMessage() {
-  const text = input.trim();
-
-  if (
-    !text ||
-    requestInProgress.current ||
-    !storageReady ||
-    !userId
-  ) {
-    return;
-  }
-
-  requestInProgress.current = true;
-
-  const chatId = activeChatId ?? createChatId();
-
-  const history: Message[] = [
-    ...messages,
-    { role: "user", content: text },
-  ];
-
-  const initialMessages: Message[] = [
-    ...history,
-    { role: "assistant", content: "" },
-  ];
-
-  setActiveChatId(chatId);
-  setInput("");
-  setLoading(true);
-  setStreaming(true);
-  setHistoryOpen(false);
-
-  saveConversation(chatId, initialMessages);
-
-  try {
-    const answer = await getAnswer(history, (fullText) => {
-      saveConversation(chatId, [
-        ...history,
-        { role: "assistant", content: fullText },
-      ]);
-    });
-
-    saveConversation(chatId, [
-      ...history,
-      { role: "assistant", content: answer },
-    ]);
-  } catch (error) {
-    saveConversation(chatId, [
-      ...history,
-      {
-        role: "assistant",
-        content: `I couldn't complete that request. ${getErrorMessage(error)}`,
-        isError: true,
-      },
-    ]);
-  } finally {
+  // Reset the response status.
+  function resetRequestState() {
     requestInProgress.current = false;
     setLoading(false);
     setStreaming(false);
+    setHasReceivedFirstChunk(false);
     inputRef.current?.focus();
   }
-}
 
-async function retryMessage(index: number) {
-  if (
-    requestInProgress.current ||
-    !activeChatId
-  ) {
-    return;
-  }
+  // Send a new message.
+  async function sendMessage() {
+    const text = input.trim();
 
-  const history = messages.slice(0, index);
+    if (
+      !text ||
+      text.length > MAX_MESSAGE_LENGTH ||
+      requestInProgress.current ||
+      !storageReady ||
+      !userId
+    ) {
+      return;
+    }
 
-  if (history.at(-1)?.role !== "user") return;
+    requestInProgress.current = true;
 
-  requestInProgress.current = true;
+    const chatId = activeChatId ?? createId("chat");
 
-  setLoading(true);
-  setStreaming(true);
+    const history: Message[] = [
+      ...messages,
+      { role: "user", content: text },
+    ];
 
-  const chatId = activeChatId;
+    setActiveChatId(chatId);
+    setInput("");
+    setLoading(true);
+    setStreaming(false);
+    setHasReceivedFirstChunk(false);
 
-  saveConversation(chatId, [
-    ...history,
-    { role: "assistant", content: "" },
-  ]);
+    saveConversation(chatId, [
+      ...history,
+      { role: "assistant", content: "" },
+    ]);
 
-  try {
-    const answer = await getAnswer(history, (fullText) => {
+    try {
+      const answer = await getAnswer(history, (fullText) => {
+        if (!requestInProgress.current) return;
+
+        setStreaming(true);
+        setHasReceivedFirstChunk(true);
+
+        saveConversation(chatId, [
+          ...history,
+          { role: "assistant", content: fullText },
+        ]);
+      });
+
       saveConversation(chatId, [
         ...history,
-        { role: "assistant", content: fullText },
+        { role: "assistant", content: answer },
       ]);
-    });
-
-    saveConversation(chatId, [
-      ...history,
-      { role: "assistant", content: answer },
-    ]);
-  } catch (error) {
-    saveConversation(chatId, [
-      ...history,
-      {
-        role: "assistant",
-        content: `I couldn't complete that request. ${getErrorMessage(error)}`,
-        isError: true,
-      },
-    ]);
-  } finally {
-    requestInProgress.current = false;
-    setLoading(false);
-    setStreaming(false);
-    inputRef.current?.focus();
+    } catch (error) {
+      saveConversation(chatId, [
+        ...history,
+        {
+          role: "assistant",
+          content: `I couldn't complete that request. ${getErrorMessage(error)}`,
+          isError: true,
+        },
+      ]);
+    } finally {
+      resetRequestState();
+    }
   }
-}
 
-  // Copy an assistant response.
+  // Retry a failed assistant response.
+  async function retryMessage(index: number) {
+    if (requestInProgress.current || !activeChatId) return;
+
+    const history = messages.slice(0, index);
+
+    if (history.at(-1)?.role !== "user") return;
+
+    requestInProgress.current = true;
+
+    const chatId = activeChatId;
+
+    setLoading(true);
+    setStreaming(false);
+    setHasReceivedFirstChunk(false);
+
+    saveConversation(chatId, [
+      ...history,
+      { role: "assistant", content: "" },
+    ]);
+
+    try {
+      const answer = await getAnswer(history, (fullText) => {
+        if (!requestInProgress.current) return;
+
+        setStreaming(true);
+        setHasReceivedFirstChunk(true);
+
+        saveConversation(chatId, [
+          ...history,
+          { role: "assistant", content: fullText },
+        ]);
+      });
+
+      saveConversation(chatId, [
+        ...history,
+        { role: "assistant", content: answer },
+      ]);
+    } catch (error) {
+      saveConversation(chatId, [
+        ...history,
+        {
+          role: "assistant",
+          content: `I couldn't complete that request. ${getErrorMessage(error)}`,
+          isError: true,
+        },
+      ]);
+    } finally {
+      resetRequestState();
+    }
+  }
+
+  // Copy a response.
   async function copyMessage(content: string, index: number) {
     try {
       await navigator.clipboard.writeText(content);
-
       setCopiedIndex(index);
 
       window.setTimeout(() => {
-        setCopiedIndex((current) =>
-          current === index ? null : current
-        );
+        setCopiedIndex((current) => current === index ? null : current);
       }, 1500);
     } catch {
       console.error("Clipboard access was blocked.");
     }
   }
 
-  // Start a blank conversation.
+  // Start a fresh conversation.
   function startNewChat() {
     if (requestInProgress.current) return;
 
     setActiveChatId(null);
     setMessages([]);
     setInput("");
-    setHistoryOpen(false);
     setHistorySearch("");
     setRenamingChatId(null);
-
     inputRef.current?.focus();
   }
 
@@ -624,21 +560,17 @@ async function retryMessage(index: number) {
     setActiveChatId(chat.id);
     setMessages(chat.messages);
     setInput("");
-    setHistoryOpen(false);
     setRenamingChatId(null);
-
     inputRef.current?.focus();
   }
 
-  // Delete a saved conversation.
+  // Delete a conversation.
   function deleteConversation(chatId: string) {
     if (requestInProgress.current) return;
 
-    const remaining = conversations.filter(
-      (chat) => chat.id !== chatId
+    setConversations((previous) =>
+      previous.filter((chat) => chat.id !== chatId)
     );
-
-    setConversations(remaining);
 
     if (activeChatId === chatId) {
       setActiveChatId(null);
@@ -650,7 +582,7 @@ async function retryMessage(index: number) {
     }
   }
 
-  // Begin editing a conversation title.
+  // Rename a conversation.
   function beginRename(chat: Conversation) {
     if (requestInProgress.current) return;
 
@@ -658,7 +590,6 @@ async function retryMessage(index: number) {
     setRenameValue(chat.title);
   }
 
-  // Save an edited conversation title.
   function saveRename(chatId: string) {
     const title = renameValue
       .replace(/\s+/g, " ")
@@ -668,9 +599,7 @@ async function retryMessage(index: number) {
     if (title) {
       setConversations((previous) =>
         previous.map((chat) =>
-          chat.id === chatId
-            ? { ...chat, title }
-            : chat
+          chat.id === chatId ? { ...chat, title } : chat
         )
       );
     }
@@ -679,450 +608,382 @@ async function retryMessage(index: number) {
     setRenameValue("");
   }
 
+  // Use a suggested prompt.
+  function useSuggestion(prompt: string) {
+    if (loading) return;
+
+    setInput(prompt);
+    inputRef.current?.focus();
+  }
+
+  // Enter sends; Shift+Enter creates a new line.
+  function handleComposerKeyDown(
+    event: React.KeyboardEvent<HTMLTextAreaElement>
+  ) {
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      !event.nativeEvent.isComposing
+    ) {
+      event.preventDefault();
+      void sendMessage();
+    }
+  }
+
+  const canSend =
+    input.trim().length > 0 &&
+    input.length <= MAX_MESSAGE_LENGTH &&
+    !loading &&
+    storageReady &&
+    Boolean(userId);
+
   return (
     <main className={styles.app}>
-      <header className={styles.header}>
+      <aside className={styles.sidebar} aria-label="Main sidebar">
         <a
-          className={styles.brand}
+          className={styles.sidebarBrand}
           href="/"
-          aria-label="Krazy AI home"
           onClick={(event) => {
             event.preventDefault();
             startNewChat();
           }}
+          aria-label="Krazy AI home"
         >
-          <span className={styles.logo}>K</span>
-
+          <span className={styles.sidebarLogo}>K</span>
           <span>
-            Krazy <span className={styles.brandAccent}>AI</span>
+            Krazy <span className={styles.sidebarBrandAccent}>AI</span>
           </span>
         </a>
 
-        <div className={styles.headerActions}>
-          <button
-            className={styles.historyButton}
-            onClick={() => setHistoryOpen((open) => !open)}
-            disabled={!storageReady}
-            type="button"
-            aria-expanded={historyOpen}
-            aria-controls="chat-history"
-          >
-            <span aria-hidden="true">◷</span>
-            <span>History</span>
-            <span className={styles.count}>
-              {conversations.length}
-            </span>
-          </button>
+        <button
+          className={styles.sidebarNewChat}
+          type="button"
+          onClick={startNewChat}
+          disabled={loading || !storageReady}
+        >
+          <span aria-hidden="true">＋</span>
+          New Chat
+        </button>
 
-          <button
-            className={styles.newChat}
-            onClick={startNewChat}
-            disabled={loading}
-            type="button"
-          >
-            <span aria-hidden="true">＋</span> New chat
-          </button>
-        </div>
-      </header>
+        <input
+          className={styles.sidebarSearch}
+          type="search"
+          value={historySearch}
+          onChange={(event) => setHistorySearch(event.target.value)}
+          placeholder="Search chats..."
+          aria-label="Search conversations"
+        />
 
-      {historyOpen && (
-        <>
-          <button
-            className={styles.backdrop}
-            aria-label="Close chat history"
-            onClick={() => setHistoryOpen(false)}
-            type="button"
-          />
+        <h2 className={styles.sidebarSectionTitle}>Your Chats</h2>
 
-          <aside
-            className={styles.historyPanel}
-            id="chat-history"
-            aria-label="Saved conversations"
-          >
-            <div className={styles.historyHeading}>
-              <div>
-                <h2>Your chats</h2>
-                <p>
-                  {conversations.length} saved conversation
-                  {conversations.length === 1 ? "" : "s"}
-                </p>
+        <div className={styles.sidebarHistory}>
+          {!storageReady ? (
+            <p className={styles.emptyHistory}>Loading chats...</p>
+          ) : filteredConversations.length === 0 ? (
+            <p className={styles.emptyHistory}>
+              {historySearch
+                ? "No matching chats."
+                : "Your conversations will appear here."}
+            </p>
+          ) : (
+            filteredConversations.map((chat) => (
+              <div
+                className={`${styles.sidebarChat} ${
+                  chat.id === activeChatId ? styles.active : ""
+                }`}
+                key={chat.id}
+              >
+                {renamingChatId === chat.id ? (
+                  <form
+                    className={styles.renameForm}
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      saveRename(chat.id);
+                    }}
+                  >
+                    <input
+                      ref={renameRef}
+                      value={renameValue}
+                      onChange={(event) => setRenameValue(event.target.value)}
+                      maxLength={60}
+                      aria-label="New conversation name"
+                    />
+
+                    <button type="submit" title="Save" aria-label="Save name">
+                      ✓
+                    </button>
+
+                    <button
+                      type="button"
+                      title="Cancel"
+                      aria-label="Cancel rename"
+                      onClick={() => {
+                        setRenamingChatId(null);
+                        setRenameValue("");
+                      }}
+                    >
+                      ×
+                    </button>
+                  </form>
+                ) : (
+                  <>
+                    <button
+                      className={styles.sidebarChatOpen}
+                      type="button"
+                      onClick={() => openConversation(chat)}
+                      title={chat.title}
+                    >
+                      <strong>{chat.title}</strong>
+                    </button>
+
+                    <div className={styles.sidebarChatTools}>
+                      <button
+                        type="button"
+                        onClick={() => beginRename(chat)}
+                        disabled={loading}
+                        title="Rename chat"
+                        aria-label={`Rename ${chat.title}`}
+                      >
+                        ✎
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => deleteConversation(chat.id)}
+                        disabled={loading}
+                        title="Delete chat"
+                        aria-label={`Delete ${chat.title}`}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
+            ))
+          )}
+        </div>
+
+        <div className={styles.sidebarBottom}>
+          <p className={styles.sidebarStorage}>
+            Chats are saved in this browser on this device.
+          </p>
+        </div>
+      </aside>
+
+      <div className={styles.mainContent}>
+        <section className={styles.chat} aria-label="Chat conversation">
+          {messages.length === 0 ? (
+            <div className={styles.welcome}>
+              <div className={styles.welcomeLogo}>K</div>
+
+              <p className={styles.eyebrow}>WELCOME TO KRAZY AI</p>
+
+              <h1 className={styles.welcomeTitle}>
+                THINK BIGGER.
+                <br />
+                <span>GO KRAZY.</span>
+              </h1>
+
+              <p className={styles.subtitle}>
+                Your ideas have no limits. Let's make something happen.
+              </p>
 
               <button
-                className={styles.iconButton}
                 type="button"
-                onClick={() => setHistoryOpen(false)}
-                aria-label="Close history"
+                className={styles.welcomePrompt}
+                onClick={() => inputRef.current?.focus()}
               >
-                ×
+                <span>Ask Krazy AI anything...</span>
+                <span className={styles.promptArrow}>↓</span>
               </button>
+
+              <p className={styles.suggestionHeading}>GET STARTED WITH</p>
+
+              <div className={styles.suggestions}>
+                {[
+                  {
+                    title: "Build something",
+                    prompt: "Help me plan and build something awesome.",
+                    symbol: "＋",
+                  },
+                  {
+                    title: "Brainstorm ideas",
+                    prompt: "Help me brainstorm creative and original ideas.",
+                    symbol: "✳",
+                  },
+                  {
+                    title: "Learn something",
+                    prompt: "Teach me something interesting and explain it clearly.",
+                    symbol: "⌘",
+                  },
+                  {
+                    title: "Create something",
+                    prompt: "Help me create something from scratch.",
+                    symbol: "✦",
+                  },
+                ].map((item) => (
+                  <button
+                    key={item.title}
+                    type="button"
+                    className={styles.suggestion}
+                    onClick={() => useSuggestion(item.prompt)}
+                  >
+                    <span className={styles.suggestionIcon}>{item.symbol}</span>
+                    <span className={styles.suggestionText}>
+                      <strong>{item.title}</strong>
+                    </span>
+                    <span className={styles.suggestionArrow} aria-hidden="true">
+                      ↗
+                    </span>
+                  </button>
+                ))}
+              </div>
             </div>
-
-            <label className={styles.searchBox}>
-              <span aria-hidden="true">⌕</span>
-
-              <input
-                value={historySearch}
-                onChange={(event) =>
-                  setHistorySearch(event.target.value)
+          ) : (
+            <div className={styles.messages}>
+              {messages.map((message, index) => {
+                if (
+                  message.role === "assistant" &&
+                  !message.content &&
+                  loading
+                ) {
+                  return null;
                 }
-                placeholder="Search chats and messages..."
-                aria-label="Search chat history"
-              />
 
-              {historySearch && (
-                <button
-                  type="button"
-                  onClick={() => setHistorySearch("")}
-                  aria-label="Clear search"
+                return (
+                <article
+                  key={`${index}-${message.role}`}
+                  className={`${styles.message} ${
+                    message.role === "user"
+                      ? styles.userMessage
+                      : styles.assistantMessage
+                  }`}
                 >
-                  ×
-                </button>
-              )}
-            </label>
-
-            <button
-              className={styles.panelNewChat}
-              type="button"
-              onClick={startNewChat}
-              disabled={loading}
-            >
-              <span aria-hidden="true">＋</span> Start a new chat
-            </button>
-
-            <div className={styles.chatList}>
-              {filteredConversations.length === 0 ? (
-                <div className={styles.emptyHistory}>
-                  <span aria-hidden="true">⌕</span>
-
-                  <strong>
-                    {historySearch
-                      ? "No matching chats"
-                      : "No conversations yet"}
-                  </strong>
-
-                  <p>
-                    {historySearch
-                      ? "Try another search term."
-                      : "Your saved conversations will appear here."}
-                  </p>
-                </div>
-              ) : (
-                filteredConversations.map((chat) => (
-                  <div
-                    className={`${styles.chatItem} ${
-                      chat.id === activeChatId
-                        ? styles.activeChat
-                        : ""
-                    }`}
-                    key={chat.id}
-                  >
-                    {renamingChatId === chat.id ? (
-                      <form
-                        className={styles.renameForm}
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          saveRename(chat.id);
-                        }}
-                      >
-                        <input
-                          ref={renameRef}
-                          value={renameValue}
-                          onChange={(event) =>
-                            setRenameValue(event.target.value)
-                          }
-                          maxLength={60}
-                          aria-label="New conversation name"
-                        />
-
-                        <button
-                          type="submit"
-                          aria-label="Save conversation name"
-                          title="Save"
-                        >
-                          ✓
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setRenamingChatId(null);
-                            setRenameValue("");
-                          }}
-                          aria-label="Cancel rename"
-                          title="Cancel"
-                        >
-                          ×
-                        </button>
-                      </form>
-                    ) : (
-                      <>
-                        <button
-                          className={styles.chatOpen}
-                          type="button"
-                          onClick={() => openConversation(chat)}
-                        >
-                          <strong>{chat.title}</strong>
-
-                          <span>
-                            {chat.messages.length} messages ·{" "}
-                            {new Date(
-                              chat.updatedAt
-                            ).toLocaleDateString()}
-                          </span>
-                        </button>
-
-                        <div className={styles.chatTools}>
-                          <button
-                            className={styles.smallIconButton}
-                            type="button"
-                            onClick={() => beginRename(chat)}
-                            disabled={loading}
-                            aria-label={`Rename ${chat.title}`}
-                            title="Rename"
-                          >
-                            ✎
-                          </button>
-
-                          <button
-                            className={styles.smallIconButton}
-                            type="button"
-                            onClick={() =>
-                              deleteConversation(chat.id)
-                            }
-                            disabled={loading}
-                            aria-label={`Delete ${chat.title}`}
-                            title="Delete"
-                          >
-                            ×
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
-
-            <p className={styles.storageNote}>
-              Chats are saved in this browser on this device.
-            </p>
-          </aside>
-        </>
-      )}
-
-      <section
-        className={styles.chat}
-        aria-label="Chat conversation"
-      >
-        {messages.length === 0 ? (
-          <div className={styles.welcome}>
-            <div className={styles.welcomeLogo}>K</div>
-
-            <p className={styles.eyebrow}>
-              YOUR AI ASSISTANT
-            </p>
-
-            <h1>
-              What can I help you <span>explore?</span>
-            </h1>
-
-            <p className={styles.subtitle}>
-              Ask questions, learn something new, solve problems,
-              or bring an idea to life.
-            </p>
-
-            <div className={styles.suggestions}>
-              {[
-                {
-                  title: "Learn something new",
-                  prompt:
-                    "Teach me something interesting and explain why it matters.",
-                },
-                {
-                  title: "Build a project",
-                  prompt:
-                    "Help me plan and build a website step by step.",
-                },
-                {
-                  title: "Solve a problem",
-                  prompt:
-                    "Help me solve a problem and explain each step clearly.",
-                },
-              ].map((item) => (
-                <button
-                  key={item.title}
-                  type="button"
-                  className={styles.suggestion}
-                  onClick={() => setInput(item.prompt)}
-                >
-                  <span>
-                    <strong>{item.title}</strong>
-                    <small>{item.prompt}</small>
-                  </span>
-
-                  <span
-                    className={styles.suggestionArrow}
-                    aria-hidden="true"
-                  >
-                    ↗
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <div className={styles.messages}>
-            {messages.map((message, index) => (
-              <article
-                key={`${index}-${message.role}`}
-                className={`${styles.message} ${
-                  message.role === "user"
-                    ? styles.userMessage
-                    : styles.assistantMessage
-                }`}
-              >
-                {message.role === "assistant" && (
-                  <div className={styles.avatar}>K</div>
-                )}
-
-                <div className={styles.messageBody}>
-                  <div className={styles.messageLabel}>
-                    {message.role === "user"
-                      ? "You"
-                      : "Krazy AI"}
-                  </div>
-
-                  <div
-                    className={`${styles.messageText} ${
-                      message.isError
-                        ? styles.errorText
-                        : ""
-                    }`}
-                  >
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {message.content}
-                    </ReactMarkdown>
-
-                    {streaming &&
-                      message.role === "assistant" &&
-                      index === messages.length - 1 && (
-                        <span className={styles.streamingCursor}>▍</span>
-                      )}
-                  </div>
-
                   {message.role === "assistant" && (
-                    <div className={styles.messageActions}>
-                      {!message.isError && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            void copyMessage(
-                              message.content,
-                              index
-                            )
-                          }
-                          title="Copy response"
-                        >
-                          {copiedIndex === index
-                            ? "✓ Copied"
-                            : "Copy"}
-                        </button>
-                      )}
-
-                      {message.isError && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            void retryMessage(index)
-                          }
-                          disabled={loading}
-                        >
-                          ↻ Try again
-                        </button>
-                      )}
+                    <div className={styles.avatar}>
+                      <img src="/icon.png" alt="KRAZY AI" />
                     </div>
                   )}
-                </div>
-              </article>
-            ))}
 
-            {loading && !streaming && (
-              <div className={styles.thinking}>
-                <div className={styles.avatar}>K</div>
+                  <div className={styles.messageBody}>
+                    <div className={styles.messageLabel}>
+                      {message.role === "user" ? "You" : "Krazy AI"}
+                    </div>
 
-                <div>
-                  <div className={styles.messageLabel}>
-                    Krazy AI
+                    <div
+                      className={`${styles.messageText} ${
+                        message.isError ? styles.errorText : ""
+                      }`}
+                    >
+                      {message.content ? (
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {message.content}
+                        </ReactMarkdown>
+                      ) : loading && index === messages.length - 1 ? (
+                        <span className={styles.thinkingText}>
+                          Preparing your response...
+                        </span>
+                      ) : null}
+
+                      {streaming &&
+                        message.role === "assistant" &&
+                        index === messages.length - 1 && (
+                          <span className={styles.streamingCursor}>▍</span>
+                        )}
+                    </div>
+
+                    {message.role === "assistant" && message.content && (
+                      <div className={styles.messageActions}>
+                        {!message.isError && (
+                          <button
+                            type="button"
+                            onClick={() => void copyMessage(message.content, index)}
+                            title="Copy response"
+                          >
+                            {copiedIndex === index ? "✓ Copied" : "Copy"}
+                          </button>
+                        )}
+
+                        {message.isError && (
+                          <button
+                            type="button"
+                            onClick={() => void retryMessage(index)}
+                            disabled={loading}
+                          >
+                            ↻ Try again
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </article>
+              );
+              })}
+
+              {loading && !hasReceivedFirstChunk && (
+                <div className={styles.thinking}>
+                  <div className={styles.avatar}>
+                    <img src="/icon.png" alt="KRAZY AI" />
                   </div>
 
-                  <div className={styles.thinkingText}>
-                    <span />
-                    <span />
-                    <span />
-                    <span className={styles.thinkingLabel}>
-                      Thinking
-                    </span>
+                  <div>
+                    <div className={styles.messageLabel}>Krazy AI</div>
+                    <div className={styles.thinkingText}>
+                      <span />
+                      <span />
+                      <span />
+                      <span className={styles.thinkingLabel}>Thinking</span>
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              )}
 
-            <div ref={bottomRef} />
-          </div>
-        )}
-      </section>
+              <div ref={bottomRef} />
+            </div>
+          )}
+        </section>
 
-      <footer className={styles.composerArea}>
-        <form
-          className={styles.composer}
-          onSubmit={(event) => {
-            event.preventDefault();
-            void sendMessage();
-          }}
-        >
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={(event) =>
-              setInput(event.target.value)
-            }
-            onKeyDown={(event) => {
-              if (
-                event.key === "Enter" &&
-                !event.shiftKey
-              ) {
-                event.preventDefault();
-                void sendMessage();
-              }
+        <footer className={styles.composerArea}>
+          <form
+            className={styles.composer}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void sendMessage();
             }}
-            placeholder="Message Krazy AI..."
-            aria-label="Message Krazy AI"
-            rows={1}
-            maxLength={MAX_MESSAGE_LENGTH}
-            disabled={loading || !storageReady}
-          />
-
-          <button
-            className={styles.sendButton}
-            type="submit"
-            disabled={
-              loading ||
-              !input.trim() ||
-              !storageReady ||
-              !userId
-            }
-            aria-label="Send message"
-            title="Send message"
           >
-            ↑
-          </button>
-        </form>
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={handleComposerKeyDown}
+              placeholder="Message KRAZY AI..."
+              aria-label="Message Krazy AI"
+              rows={1}
+              maxLength={MAX_MESSAGE_LENGTH}
+              disabled={loading || !storageReady}
+            />
 
-        <p className={styles.disclaimer}>
-          Krazy AI can make mistakes. Check important information.
-        </p>
-      </footer>
+            <button
+              className={styles.sendButton}
+              type="submit"
+              disabled={!canSend}
+              aria-label="Send message"
+              title="Send message"
+            >
+              {loading ? "…" : "↑"}
+            </button>
+          </form>
+
+          <div className={styles.disclaimer}>
+            <span>
+              {input.length}/{MAX_MESSAGE_LENGTH}
+            </span>
+            <span>Enter to send · Shift + Enter for a new line</span>
+            <span>Krazy AI can make mistakes. Check important information.</span>
+          </div>
+        </footer>
+      </div>
     </main>
   );
 }
