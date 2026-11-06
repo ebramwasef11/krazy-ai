@@ -1523,3 +1523,540 @@
     padding-left: 12px;
   }
 }
+
+/* ACCOUNT AUTHENTICATION */
+
+.authPage {
+  min-height: 100vh;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 18px;
+  background:
+    radial-gradient(ellipse at 50% 0%, rgba(204, 0, 0, 0.15), transparent 55%),
+    #080808;
+}
+
+.authCard {
+  width: 100%;
+  max-width: 440px;
+  padding: 42px 36px;
+  border: 1px solid #292929;
+  border-radius: 18px;
+  background: #111111;
+  box-shadow: 0 24px 90px rgba(0, 0, 0, 0.45);
+}
+
+.authBrand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #ffffff;
+  font-size: 21px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-decoration: none;
+}
+
+.authBrand strong {
+  color: #e00000;
+}
+
+.authLogo {
+  width: 46px;
+  height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 11px;
+  background: #d00000;
+  color: #ffffff;
+  font-family: "Darkcastle", sans-serif;
+  font-size: 31px;
+}
+
+.authEyebrow {
+  margin: 30px 0 10px;
+  color: #e00000;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 3px;
+}
+
+.authTitle {
+  margin: 0;
+  color: #ffffff;
+  text-align: center;
+  font-size: clamp(27px, 6vw, 35px);
+  font-weight: 900;
+  letter-spacing: -1px;
+}
+
+.authDescription {
+  margin: 12px 0 28px;
+  color: #999999;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.authForm {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.authLabel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #dddddd;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.authLabel input {
+  width: 100%;
+  min-height: 47px;
+  padding: 0 14px;
+  border: 1px solid #333333;
+  border-radius: 8px;
+  outline: none;
+  background: #090909;
+  color: #ffffff;
+  font: inherit;
+  font-size: 14px;
+  transition: border-color 0.2s ease;
+}
+
+.authLabel input:focus {
+  border-color: #d00000;
+}
+
+.authLabel input::placeholder {
+  color: #666666;
+}
+
+.authSubmit {
+  min-height: 48px;
+  margin-top: 5px;
+  border: 0;
+  border-radius: 8px;
+  background: #d00000;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 1.5px;
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+
+.authSubmit:hover:not(:disabled) {
+  background: #f00000;
+  transform: translateY(-1px);
+}
+
+.authSubmit:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.authError,
+.authSuccess {
+  margin: 0;
+  padding: 11px 12px;
+  border-radius: 7px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.authError {
+  border: 1px solid rgba(220, 40, 40, 0.35);
+  background: rgba(220, 40, 40, 0.1);
+  color: #ff7777;
+}
+
+.authSuccess {
+  border: 1px solid rgba(60, 180, 110, 0.3);
+  background: rgba(60, 180, 110, 0.09);
+  color: #8cdda8;
+}
+
+.authTextButton,
+.authSwitch button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #ff4141;
+  font: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+.authTextButton {
+  display: block;
+  margin: 17px 0 0 auto;
+  font-size: 12px;
+}
+
+.authSwitch {
+  margin: 24px 0 0;
+  color: #999999;
+  text-align: center;
+  font-size: 12px;
+}
+
+.authSwitch button {
+  font-weight: 800;
+}
+
+.authFooter {
+  margin: 29px 0 0;
+  padding-top: 19px;
+  border-top: 1px solid #292929;
+  color: #707070;
+  text-align: center;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* SIGNED-IN ACCOUNT AREA */
+
+.accountPanel {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 8px;
+  border-top: 1px solid #292929;
+}
+
+.accountAvatar {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: #b90000;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.accountDetails {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.accountDetails strong {
+  color: #eeeeee;
+  font-size: 11px;
+}
+
+.accountDetails span {
+  overflow: hidden;
+  color: #858585;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.signOutButton {
+  width: 32px;
+  height: 32px;
+  border: 1px solid #333333;
+  border-radius: 7px;
+  background: #151515;
+  color: #aaaaaa;
+  cursor: pointer;
+}
+
+.signOutButton:hover {
+  border-color: #b90000;
+  color: #ff4444;
+}
+
+.accountNotice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  max-width: 850px;
+  margin: 0 auto 10px;
+  padding: 10px 13px;
+  border: 1px solid rgba(220, 40, 40, 0.35);
+  border-radius: 8px;
+  background: rgba(220, 40, 40, 0.1);
+  color: #ff8585;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.accountNotice button {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 18px;
+  cursor: pointer;
+}
+
+@media (max-width: 520px) {
+  .authCard {
+    padding: 34px 22px;
+  }
+}
+
+/* PERSONALIZATION */
+
+.sidebarPersonalization {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 13px;
+  margin-top: 9px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: #b9b9b9;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: 0.2s ease;
+}
+
+.sidebarPersonalization:hover {
+  background: #191919;
+  color: #fff;
+}
+
+.sidebarPersonalizationActive {
+  background: #211313;
+  border-color: #552020;
+  color: #fff;
+}
+
+.sidebarPersonalizationActive span {
+  color: #cc0000;
+}
+
+.personalizationPage {
+  width: 100%;
+  max-width: 850px;
+  margin: 0 auto;
+  padding: 65px 38px 90px;
+  overflow-y: auto;
+}
+
+.personalizationHeader {
+  margin-bottom: 42px;
+}
+
+.personalizationHeader h1 {
+  margin: 9px 0 12px;
+  color: #fff;
+  font-size: clamp(30px, 5vw, 42px);
+  font-weight: 750;
+  letter-spacing: -1.5px;
+}
+
+.personalizationHeader > p:last-child {
+  max-width: 620px;
+  color: #999;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.personalizationSection {
+  margin-bottom: 36px;
+}
+
+.personalizationSection h2 {
+  margin: 0 0 9px;
+  color: #fff;
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.personalizationHint {
+  margin: 0 0 18px;
+  color: #888;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.personalityGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 13px;
+}
+
+.personalityCard {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 145px;
+  padding: 19px;
+  border: 1px solid #303030;
+  border-radius: 12px;
+  background: #111;
+  color: #fff;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.personalityCard:hover {
+  border-color: #666;
+  background: #171717;
+}
+
+.personalityCardActive {
+  border-color: #cc0000;
+  background: #1b1111;
+  box-shadow: inset 0 0 0 1px #cc000033;
+}
+
+.personalityCardTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.personalityCardTop strong {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.personalityRadio {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 21px;
+  height: 21px;
+  flex-shrink: 0;
+  border: 1px solid #555;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 12px;
+}
+
+.personalityCardActive .personalityRadio {
+  border-color: #cc0000;
+  background: #cc0000;
+}
+
+.personalityDescription {
+  color: #ddd;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.personalityPreview {
+  color: #888;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.customInstructionsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 9px;
+}
+
+.customInstructionsHeader h2 {
+  margin: 0;
+}
+
+.customInstructionsHeader span {
+  color: #777;
+  font-size: 12px;
+}
+
+.customInstructions {
+  width: 100%;
+  min-height: 130px;
+  resize: vertical;
+  padding: 15px;
+  border: 1px solid #303030;
+  border-radius: 10px;
+  outline: none;
+  background: #111;
+  color: #eee;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  transition: border-color 0.2s ease;
+}
+
+.customInstructions:focus {
+  border-color: #cc0000;
+}
+
+.customInstructions::placeholder {
+  color: #666;
+}
+
+.preferencesStatus,
+.preferencesError {
+  margin: 0 0 15px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.preferencesStatus {
+  color: #aaa;
+}
+
+.preferencesError {
+  color: #ff7777;
+}
+
+.savePreferencesButton {
+  min-height: 44px;
+  padding: 0 22px;
+  border: 1px solid #cc0000;
+  border-radius: 8px;
+  background: #cc0000;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.7px;
+  cursor: pointer;
+  transition: background 0.2s ease, opacity 0.2s ease;
+}
+
+.savePreferencesButton:hover:not(:disabled) {
+  background: #e00000;
+}
+
+.savePreferencesButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (max-width: 700px) {
+  .personalizationPage {
+    padding: 35px 20px 65px;
+  }
+
+  .personalityGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .personalizationHeader {
+    margin-bottom: 32px;
+  }
+}
