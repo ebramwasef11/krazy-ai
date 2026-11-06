@@ -178,6 +178,8 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const [routeChatId, setRouteChatId] = useState<string | null>(null);
+  const [routeReady, setRouteReady] = useState(false);
 
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -209,6 +211,53 @@ export default function Home() {
   const syncedIds = useRef<Set<string>>(new Set());
   const syncQueues = useRef<Map<string, Promise<void>>>(new Map());
   const currentSession = useRef<Session | null>(null);
+  // Keep the browser URL synchronized with the selected conversation.
+function updateChatUrl(chatId: string | null, replace = false) {
+  if (typeof window !== "undefined") {
+    const nextPath = chatId
+      ? `/c/${encodeURIComponent(chatId)}`
+      : "/";
+
+    if (window.location.pathname !== nextPath) {
+      window.history[replace ? "replaceState" : "pushState"](
+        {},
+        "",
+        nextPath
+      );
+    }
+  }
+
+  setRouteChatId(chatId);
+}
+
+// Read conversation URLs and support browser back/forward navigation.
+useEffect(() => {
+  function syncRoute() {
+    const match = window.location.pathname.match(/^\/c\/([^/]+)\/?$/);
+    let chatId: string | null = null;
+
+    if (match) {
+      try {
+        chatId = decodeURIComponent(match[1]);
+      } catch {
+        chatId = null;
+      }
+    } else if (window.location.pathname !== "/") {
+      window.history.replaceState({}, "", "/");
+    }
+
+    setRouteChatId(chatId);
+    setRouteReady(true);
+  }
+
+  syncRoute();
+
+  window.addEventListener("popstate", syncRoute);
+
+  return () => {
+    window.removeEventListener("popstate", syncRoute);
+  };
+}, []);
 
   // Supabase authentication.
   useEffect(() => {
@@ -435,13 +484,8 @@ export default function Home() {
 
         setConversations(loaded);
 
-        if (loaded.length > 0) {
-          setActiveChatId(loaded[0].id);
-          setMessages(loaded[0].messages);
-        } else {
-          setActiveChatId(null);
-          setMessages([]);
-        }
+        setActiveChatId(null);
+        setMessages([]);
       } catch (error) {
         if (!cancelled) {
           setAuthError(getErrorMessage(error));
@@ -459,6 +503,28 @@ export default function Home() {
       cancelled = true;
     };
   }, [session?.access_token]);
+    // Select the conversation requested by the current URL.
+  useEffect(() => {
+    if (!routeReady || !storageReady) return;
+
+    if (!routeChatId) {
+      setActiveChatId(null);
+      setMessages([]);
+      return;
+    }
+
+    const requestedChat = conversations.find(
+      (chat) => chat.id === routeChatId
+    );
+
+    if (requestedChat) {
+      setActiveChatId(requestedChat.id);
+      setMessages(requestedChat.messages);
+    } else {
+      setActiveChatId(null);
+      setMessages([]);
+    }
+  }, [routeChatId, routeReady, storageReady, conversations]);
 
   // Keep the newest message visible.
   useEffect(() => {
@@ -768,6 +834,10 @@ export default function Home() {
 
     const chatId = activeChatId ?? createId("chat");
 
+    if (!activeChatId) {
+      updateChatUrl(chatId);
+    }
+
     const history: Message[] = [
       ...messages,
       { role: "user", content: text },
@@ -885,6 +955,8 @@ export default function Home() {
   function startNewChat() {
     if (requestInProgress.current) return;
 
+    updateChatUrl(null);
+
     setActiveView("chat");
     setActiveChatId(null);
     setMessages([]);
@@ -897,6 +969,8 @@ export default function Home() {
   // Open a saved conversation.
   function openConversation(chat: Conversation) {
     if (requestInProgress.current) return;
+
+    updateChatUrl(chat.id);
 
     setActiveView("chat");
     setActiveChatId(chat.id);
@@ -917,6 +991,7 @@ export default function Home() {
     if (activeChatId === chatId) {
       setActiveChatId(null);
       setMessages([]);
+      updateChatUrl(null);
     }
 
     if (renamingChatId === chatId) {
