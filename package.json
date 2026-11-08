@@ -1,4 +1,5 @@
 {
+  "$schema": "https://json.schemastore.org/package",
   "name": "my-ai-chatbot",
   "version": "0.1.0",
   "private": true,

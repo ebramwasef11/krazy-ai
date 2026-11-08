@@ -72,6 +72,7 @@ const PERSONALITIES: {
 ];
 
 const WORKER_URL = "https://krazy.ebramw2013.workers.dev";
+const OWNER_TOKEN_STORAGE_KEY = "krazy_owner_token_v1";
 const REQUEST_TIMEOUT = 90000;
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_HISTORY_MESSAGES = 20;
@@ -193,6 +194,7 @@ export default function Home() {
   const [renameValue, setRenameValue] = useState("");
 
   const [storageReady, setStorageReady] = useState(false);
+  const [ownerMode, setOwnerMode] = useState(false);
 
   // Personalization state.
   const [activeView, setActiveView] = useState<"chat" | "personalization">("chat");
@@ -297,6 +299,53 @@ useEffect(() => {
       subscription.unsubscribe();
     };
   }, []);
+  // Restore and verify Owner Mode from this browser.
+useEffect(() => {
+  const token = localStorage.getItem(OWNER_TOKEN_STORAGE_KEY);
+
+  if (!token) {
+    setOwnerMode(false);
+    return;
+  }
+
+  const ownerToken = token;
+
+  let cancelled = false;
+
+  async function verifyOwnerMode() {
+    try {
+      const response = await fetch(`${WORKER_URL}/owner/status`, {
+        method: "GET",
+        headers: {
+          "X-Krazy-Owner-Token": ownerToken,
+        },
+        cache: "no-store",
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (cancelled) return;
+
+      if (response.ok && data.active === true) {
+        setOwnerMode(true);
+      } else {
+        localStorage.removeItem(OWNER_TOKEN_STORAGE_KEY);
+        setOwnerMode(false);
+      }
+    } catch {
+      if (!cancelled) {
+        // Keep the saved token if verification temporarily fails.
+        setOwnerMode(false);
+      }
+    }
+  }
+
+  void verifyOwnerMode();
+
+  return () => {
+    cancelled = true;
+  };
+}, []);
 
   // Send authenticated requests to the Worker.
   async function workerRequest(
@@ -691,6 +740,12 @@ useEffect(() => {
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${activeSession.access_token}`,
+          ...(localStorage.getItem(OWNER_TOKEN_STORAGE_KEY) !== null
+            ? {
+                "X-Krazy-Owner-Token":
+                  localStorage.getItem(OWNER_TOKEN_STORAGE_KEY) as string,
+              }
+            : {}),
         },
         signal: controller.signal,
         body: JSON.stringify({
@@ -829,6 +884,310 @@ useEffect(() => {
     ) {
       return;
     }
+    // Owner commands. These commands are not saved in chat history.
+  const isOwnerCommand =
+    text === "/owner" ||
+    text.startsWith("/owner ") ||
+    [
+      "/owneroff",
+      "/ownerinfo",
+      "/ownerhelp",
+      "/ownerstats",
+      "/ownerusers",
+      "/ownerpersonality",
+    ].includes(text.split(/\s+/)[0]);
+
+  if (isOwnerCommand) {
+    setInput("");
+
+    // Disable Owner Mode in this browser.
+    if (text === "/owneroff") {
+      localStorage.removeItem(OWNER_TOKEN_STORAGE_KEY);
+      setOwnerMode(false);
+
+      setMessages((previous) => [
+        ...previous,
+        {
+          role: "assistant",
+          content: "Owner Mode has been disabled in this browser.",
+        },
+      ]);
+
+      return;
+    }
+
+    // Activate Owner Mode with the secret code.
+    if (text.startsWith("/owner ")) {
+      const ownerCode = text.slice(7).trim();
+
+      if (!ownerCode) {
+        setMessages((previous) => [
+          ...previous,
+          {
+            role: "assistant",
+            content: "Enter your activation code after /owner.",
+          },
+        ]);
+        return;
+      }
+
+      requestInProgress.current = true;
+      setLoading(true);
+
+      try {
+        const response = await fetch(`${WORKER_URL}/owner/activate`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ code: ownerCode }),
+          cache: "no-store",
+        });
+
+        const data = await response.json().catch(() => ({}));
+
+        if (!response.ok || typeof data.token !== "string") {
+          throw new Error(
+            typeof data.error === "string"
+              ? data.error
+              : "Owner Mode activation failed."
+          );
+        }
+
+        localStorage.setItem(OWNER_TOKEN_STORAGE_KEY, data.token);
+        setOwnerMode(true);
+
+        setMessages((previous) => [
+          ...previous,
+          {
+            role: "assistant",
+            content:
+              "Owner Mode activated successfully. Welcome, creator.",
+          },
+        ]);
+      } catch (error) {
+        setMessages((previous) => [
+          ...previous,
+          {
+            role: "assistant",
+            content: `Owner Mode activation failed: ${getErrorMessage(error)}`,
+            isError: true,
+          },
+        ]);
+      } finally {
+        resetRequestState();
+      }
+
+      return;
+    }
+
+    // Show Owner Mode status.
+    if (text === "/owner") {
+      setMessages((previous) => [
+        ...previous,
+        {
+          role: "assistant",
+          content: ownerMode
+            ? "Owner Mode is currently active in this browser."
+            : "Owner Mode is currently inactive. Use /owner followed by your activation code to activate it.",
+        },
+      ]);
+
+      return;
+    }
+
+    requestInProgress.current = true;
+    setLoading(true);
+
+    try {
+      const token = localStorage.getItem(OWNER_TOKEN_STORAGE_KEY);
+      const activeSession = currentSession.current;
+
+      if (!token || !activeSession) {
+        throw new Error("Verified Owner Mode is required.");
+      }
+
+      const accessToken = activeSession.access_token;
+      const ownerToken = token;
+
+      // Verify Owner Mode with the Worker.
+      const statusResponse = await fetch(`${WORKER_URL}/owner/status`, {
+        method: "GET",
+        headers: {
+          "X-Krazy-Owner-Token": ownerToken,
+        },
+        cache: "no-store",
+      });
+
+      const statusData = await statusResponse.json().catch(() => ({}));
+
+      if (!statusResponse.ok || statusData.active !== true) {
+        localStorage.removeItem(OWNER_TOKEN_STORAGE_KEY);
+        setOwnerMode(false);
+        throw new Error("Owner Mode is inactive or your token is invalid.");
+      }
+
+      setOwnerMode(true);
+
+      // Helper for authenticated owner-only Worker endpoints.
+      async function ownerRequest(
+        path: string,
+        method = "GET",
+        body?: unknown
+      ) {
+        const response = await fetch(`${WORKER_URL}${path}`, {
+          method,
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "X-Krazy-Owner-Token": ownerToken,
+            ...(body !== undefined
+              ? { "Content-Type": "application/json" }
+              : {}),
+          },
+          ...(body !== undefined
+            ? { body: JSON.stringify(body) }
+            : {}),
+          cache: "no-store",
+        });
+
+        const data = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+          throw new Error(
+            typeof data.error === "string"
+              ? data.error
+              : `Server error ${response.status}.`
+          );
+        }
+
+        return data;
+      }
+
+      let result = "";
+
+      // Creator information.
+      if (text === "/ownerinfo") {
+        result = [
+          "# KRAZY AI — Creator Information",
+          "",
+          "**Creator:** Ebram Wasef",
+          "**Project:** KRAZY AI",
+          "**Role:** Founder and creator",
+          "**Owner Mode:** Verified",
+        ].join("\n");
+      }
+
+      // Owner command guide.
+      else if (text === "/ownerhelp") {
+        result = [
+          "# KRAZY AI — Owner Commands",
+          "",
+          "`/owner` — Check Owner Mode status.",
+          "`/owner [code]` — Activate Owner Mode.",
+          "`/owneroff` — Disable Owner Mode in this browser.",
+          "`/ownerinfo` — Display creator information.",
+          "`/ownerhelp` — Display this command guide.",
+          "`/ownerstats` — View website statistics.",
+          "`/ownerusers` — View saved-user statistics.",
+          "`/ownerpersonality` — View global AI personality.",
+          "`/ownerpersonality default` — Set Default.",
+          "`/ownerpersonality professional` — Set Professional.",
+          "`/ownerpersonality friendly` — Set Friendly.",
+          "`/ownerpersonality concise` — Set Straight to the Point.",
+        ].join("\n");
+      }
+
+      // Website statistics.
+      else if (text === "/ownerstats") {
+        const stats = await ownerRequest("/owner/stats");
+
+        result = [
+          "# KRAZY AI — Website Statistics",
+          "",
+          `**Conversations:** ${stats.totalConversations ?? 0}`,
+          `**Messages:** ${stats.totalMessages ?? 0}`,
+          `**Saved memories:** ${stats.totalMemories ?? 0}`,
+          `**Users with saved data:** ${stats.usersWithSavedData ?? 0}`,
+        ].join("\n");
+      }
+
+      // Saved-user statistics.
+      else if (text === "/ownerusers") {
+        const users = await ownerRequest("/owner/users");
+
+        result = [
+          "# KRAZY AI — User Statistics",
+          "",
+          `**Users with saved data:** ${users.usersWithSavedData ?? 0}`,
+          `**Users with conversations:** ${users.usersWithConversations ?? 0}`,
+          `**Users with preferences:** ${users.usersWithPreferences ?? 0}`,
+          `**Users with memories:** ${users.usersWithMemories ?? 0}`,
+          "",
+          "*These are database activity counts, not total registered Supabase accounts.*",
+        ].join("\n");
+      }
+
+      // Global Owner Mode personality.
+      else if (text === "/ownerpersonality" ||
+        text.startsWith("/ownerpersonality ")) {
+        const requestedPersonality = text
+          .slice("/ownerpersonality".length)
+          .trim()
+          .toLowerCase();
+
+        const validPersonalities: Personality[] = [
+          "default",
+          "professional",
+          "friendly",
+          "concise",
+        ];
+
+        if (!requestedPersonality) {
+          const data = await ownerRequest("/owner/personality");
+
+          result = `**Global KRAZY AI personality:** ${data.personality ?? "default"}`;
+        } else if (
+          !validPersonalities.includes(
+            requestedPersonality as Personality
+          )
+        ) {
+          result =
+            "Invalid personality. Choose: default, professional, friendly, or concise.";
+        } else {
+          const data = await ownerRequest(
+            "/owner/personality",
+            "PUT",
+            { personality: requestedPersonality }
+          );
+
+          result = `Global KRAZY AI personality successfully changed to **${data.personality}**.`;
+        }
+      } else {
+        result = "Unknown Owner Mode command. Type /ownerhelp to see available commands.";
+      }
+
+      setMessages((previous) => [
+        ...previous,
+        {
+          role: "assistant",
+          content: result,
+        },
+      ]);
+    } catch (error) {
+      setMessages((previous) => [
+        ...previous,
+        {
+          role: "assistant",
+          content: `Owner command failed: ${getErrorMessage(error)}`,
+          isError: true,
+        },
+      ]);
+    } finally {
+      resetRequestState();
+    }
+
+    return;
+  }
 
     requestInProgress.current = true;
 
@@ -1425,6 +1784,24 @@ useEffect(() => {
             Krazy <span className={styles.sidebarBrandAccent}>AI</span>
           </span>
         </a>
+
+                {ownerMode && (
+          <div
+            style={{
+              margin: "8px 0 12px",
+              padding: "8px 12px",
+              border: "1px solid #cc0000",
+              borderRadius: "8px",
+              color: "#ff4444",
+              fontSize: "12px",
+              fontWeight: 700,
+              letterSpacing: "1px",
+              textAlign: "center",
+            }}
+          >
+            ★ OWNER MODE ACTIVE
+          </div>
+        )}
 
         <button
           className={styles.sidebarNewChat}
