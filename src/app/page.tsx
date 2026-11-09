@@ -39,6 +39,8 @@ type Conversation = {
 
 type Personality = "default" | "professional" | "friendly" | "concise";
 
+type AiMode = "flash" | "core" | "think" | "deep" | "omega";
+
 const PERSONALITIES: {
   id: Personality;
   name: string;
@@ -183,6 +185,7 @@ export default function Home() {
   const [routeReady, setRouteReady] = useState(false);
 
   const [input, setInput] = useState("");
+  const [aiMode, setAiMode] = useState<AiMode>("core");
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [hasReceivedFirstChunk, setHasReceivedFirstChunk] = useState(false);
@@ -750,6 +753,7 @@ useEffect(() => {
         signal: controller.signal,
         body: JSON.stringify({
           stream: true,
+          mode: aiMode,
           personality,
           customInstructions,
           messages: history
@@ -2259,6 +2263,30 @@ useEffect(() => {
                   </button>
                 </p>
               )}
+
+              <div className={styles.modePicker}>
+                <label htmlFor="krazy-ai-mode">AI MODE</label>
+                <select
+                  id="krazy-ai-mode"
+                  value={aiMode}
+                  onChange={(event) => setAiMode(event.target.value as AiMode)}
+                  disabled={loading}
+                  aria-label="Choose KRAZY AI response mode"
+                >
+                  <option value="flash">KRAZY FLASH · Fast and concise</option>
+                  <option value="core">KRAZY CORE · Balanced (Default)</option>
+                  <option value="think">KRAZY THINK · Complex reasoning</option>
+                  <option value="deep">KRAZY DEEP · Deep analysis</option>
+                  <option value="omega" disabled>KRAZY OMEGA · Premium — Coming Soon</option>
+                </select>
+                <span className={styles.modeHint}>
+                  {aiMode === "flash" && "Prioritizes quick, direct answers."}
+                  {aiMode === "core" && "Balanced detail, speed, and clarity."}
+                  {aiMode === "think" && "Takes a more structured approach to difficult problems."}
+                  {aiMode === "deep" && "Explores a topic in greater depth; live web research is not included."}
+                  {aiMode === "omega" && "Premium mode is not available yet."}
+                </span>
+              </div>
 
               <form
                 className={styles.composer}
